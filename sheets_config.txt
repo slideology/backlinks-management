@@ -1,0 +1,2 @@
+SPREADSHEET_ID=11duOTbWs4ItXnnNQ4vmucXe_GFWxn_3nnYa0YcvMH0U
+SPREADSHEET_URL=https://docs.google.com/spreadsheets/d/11duOTbWs4ItXnnNQ4vmucXe_GFWxn_3nnYa0YcvMH0U/edit

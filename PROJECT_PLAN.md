@@ -97,11 +97,8 @@ workspace-cli/
 
 ## 下一步行动计划
 
-### 立即行动 (用户操作)
-1. **完成 Google Workspace OAuth 认证设置**
-   - 访问 Google Cloud Console
-   - 创建 OAuth 2.0 客户端
-   - 下载并配置 client_secret.json
+### 拦截点 (Blockers) - 已解决 ✅
+Google OAuth 认证：已成功完成，测试用 `client_secret.json` 已配置并生成有效 token。
 
 ### 后续开发优先级
 1. **高优先级**: 完成数据迁移和 Google Sheets 集成
