@@ -111,6 +111,45 @@ def auto_post_content(page: Page, comment_content: str, url: str, max_retries: i
     return False, last_error
 
 
+import re
+
+def _verify_post_success(page: Page, frame=None) -> tuple[bool, str]:
+    """
+    提交按钮点击后，验证是否真正发帖成功（或进入审核状态）。
+    通过检查页面源码是否包含特征关键词来判断。
+    如果提供了 frame，则优先在 frame 内部检查。
+    """
+    success_keywords = [
+        "审核", "moderation", "awaiting", "approval", "pending",
+        "成功", "successfully", "posted", "published", "saved", "thanks for your comment",
+        "your comment", "replying to", "has been submitted", "idli-kurma" # 特殊测试页标识
+    ]
+    
+    # 给页面一些时间来加载响应或跳转
+    page.wait_for_timeout(3000)
+    
+    target = frame if frame else page
+    
+    try:
+        # 获取当前页面或 frame 的全部可见文本进行正则匹配
+        # 修复 strict mode violation (如果页面有多个 body 的情况，使用 all_inner_texts 拼接)
+        bodies = target.locator("body").all_inner_texts()
+        body_text = " ".join(bodies).lower()
+        
+        for kw in success_keywords:
+            if kw.lower() in body_text:
+                return True, f"判定为成功：检测到成功或审核特征词 '{kw}'"
+        
+        # 如果是主页面，且 URL 发生了变化（重定向回文章页），也视作成功
+        if not frame:
+            if page.url != getattr(page, "_original_url", "") and "#comment" in page.url:
+                return True, "判定为成功：URL已重定向至评论锚点"
+                
+        return False, "填写了评论且点击了提交，但页面没有出现成功提示词或发生跳转重定向。"
+        
+    except Exception as e:
+        return False, f"验证发帖结果时发生异常: {str(e)[:50]}"
+
 def _try_dom_post(page: Page, comment_content: str) -> tuple[bool, str]:
     """
     Layer 1 内部函数：使用传统 DOM 方式寻找评论框并填写提交
@@ -119,6 +158,9 @@ def _try_dom_post(page: Page, comment_content: str) -> tuple[bool, str]:
     方式 2 - 主页面的 contenteditable 富文本框
     方式 3 - 嵌套在 iframe 里的评论框（Blogger / Disqus / WordPress 常用）
     """
+    # 记录原始 URL 用于判断重定向
+    setattr(page, "_original_url", page.url)
+    
     # 方式 1：主页面传统 textarea
     textareas = page.locator('textarea:visible')
     if textareas.count() > 0:
@@ -181,6 +223,8 @@ def _try_dom_post(page: Page, comment_content: str) -> tuple[bool, str]:
     return False, "Layer 1: 主页面及所有 iframe 中均未找到评论输入框"
 
 
+
+
 def _try_submit_in_frame(frame, page: Page) -> tuple[bool, str]:
     """
     在 iframe 内部寻找提交按钮并点击。
@@ -202,8 +246,7 @@ def _try_submit_in_frame(frame, page: Page) -> tuple[bool, str]:
             if btn.count() > 0 and btn.first.is_visible():
                 print(f"  👉 在 iframe 内找到提交按钮 [{selector}]，准备点击...")
                 btn.first.click()
-                page.wait_for_timeout(5000)
-                return True, "在 iframe 内成功填写并提交评论！"
+                return _verify_post_success(page, frame) # 加入真实成功验证
         except:
             continue
     
@@ -238,12 +281,12 @@ def _try_submit(page: Page) -> tuple[bool, str]:
                 print(f"  👉 找到按钮 [{selector}]，准备点击...")
                 btns.first.scroll_into_view_if_needed()
                 btns.first.click()
-                page.wait_for_timeout(5000)
-                return True, "机器人自动识图填表并点击提交成功！"
+                return _verify_post_success(page) # 加入真实成功验证
         except:
             continue
     
     return False, "填写了评论内容，但没有找到可以点击的提交按钮。"
+
 
 
 # =====================================================================

@@ -140,8 +140,14 @@ def try_post_via_vision(page: Page, comment_content: str) -> tuple[bool, str]:
         if sx and sy:
             print(f"  👉 Vision AI 定位到提交按钮坐标：({sx}, {sy})，正在点击...")
             page.mouse.click(sx, sy)
-            page.wait_for_timeout(5000)
-            return True, f"Vision AI 视觉定位成功！评论框坐标({tx},{ty})，提交按钮坐标({sx},{sy})"
+            
+            # 引入刚刚在 form_automation_local.py 里写好的真实结果验证逻辑
+            from form_automation_local import _verify_post_success
+            is_success, msg = _verify_post_success(page)
+            if is_success:
+                return True, f"Vision AI 视觉定位成功！并验证发帖成功: {msg}"
+            else:
+                return False, f"Vision AI 点击了提交按钮({sx},{sy})，但验证失败: {msg}"
         else:
             return False, "Vision AI 识别到了评论框但未找到提交按钮的坐标。"
     else:
