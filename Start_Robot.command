@@ -17,8 +17,13 @@ pkill -9 "Google Chrome" 2>/dev/null
 sleep 1
 
 # 以极客模式 (调试端口 9222) 启动你 Mac 上自带的真实 Google Chrome!
-# 注意：在 Mac 上启用调试端口需要指定一个额外的 user-data-dir，我们把它挂载在临时目录
-/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222 --user-data-dir="/tmp/chrome_dev_data" --restore-last-session &
+# 【重要】这里指定的是你真实的 Chrome 用户数据目录（~/Library/Application Support/Google/Chrome）
+# 这样启动的 Chrome 会带着你所有的账号登录、Cookie、书签、历史记录！
+REAL_CHROME_DATA="$HOME/Library/Application Support/Google/Chrome"
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
+    --remote-debugging-port=9222 \
+    --user-data-dir="$REAL_CHROME_DATA" \
+    --restore-last-session &
 
 echo "-> Chrome 已在后台启动 (正在监听 9222 端口)，等待 3 秒钟加载..."
 sleep 3

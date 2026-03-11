@@ -11,6 +11,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',  # Google Sheets 读写
     'https://www.googleapis.com/auth/drive',          # Google Drive（创建文件）
+    'https://www.googleapis.com/auth/gmail.readonly', # Gmail 只读（用于提取注册验证码）
 ]
 
 # client_secret.json 路径

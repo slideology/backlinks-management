@@ -11,6 +11,8 @@ Gemini Vision 多模态视觉代理模块
 import os
 import re
 import base64
+import json
+from typing import Optional
 from dotenv import load_dotenv
 from playwright.sync_api import Page
 
@@ -25,7 +27,7 @@ def _get_gemini_client():
     return genai.Client(api_key=api_key)
 
 
-def analyze_page_for_comment_area(page: Page) -> dict | None:
+def analyze_page_for_comment_area(page: Page) -> Optional[dict]:
     """
     对网页截图并调用 Gemini Vision 分析，
     返回评论框和提交按钮的屏幕坐标字典，或 None（未找到时）。
@@ -74,7 +76,7 @@ def analyze_page_for_comment_area(page: Page) -> dict | None:
         
         from google.genai import types
         response = client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="gemini-2.5-flash",
             contents=[
                 types.Part.from_bytes(
                     data=screenshot_bytes,
@@ -87,10 +89,12 @@ def analyze_page_for_comment_area(page: Page) -> dict | None:
         result_text = response.text.strip()
         print(f"  🤖 Vision AI 分析结果: {result_text[:200]}...")
         
-        # 提取 JSON 内容（以防模型输出了多余文字）
-        json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
+        # 先剥离 Markdown 代码块标记（模型有时会返回 ```json {...} ``` 格式）
+        clean_text = re.sub(r'```(?:json)?\s*', '', result_text).replace('```', '').strip()
+        
+        # 提取 JSON 内容
+        json_match = re.search(r'\{.*\}', clean_text, re.DOTALL)
         if json_match:
-            import json
             coords = json.loads(json_match.group())
             return coords
         
