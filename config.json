@@ -1,5 +1,14 @@
 {
     "webhook": {
         "url": "https://open.feishu.cn/open-apis/bot/v2/hook/0bde20e9-1cc2-4046-b99e-91cd5d219351"
+    },
+    "scheduler": {
+        "daily_limit": 5,
+        "priority_order": ["high", "medium", "low"],
+        "retry_after_days": 3
+    },
+    "posting": {
+        "max_retries": 2,
+        "page_load_timeout_ms": 20000
     }
 }

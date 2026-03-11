@@ -1,13 +1,39 @@
 import time
+import json
 import datetime
 from gws_integration import GoogleSheetsManager
 
-# 每日最大发帖限制，防止被当作垃圾信息屏蔽
-DAILY_LIMIT = 5 
+
+def load_config(config_path="config.json"):
+    """读取 config.json 中的配置，若文件不存在或缺失字段则使用缺省值"""
+    defaults = {
+        "scheduler": {
+            "daily_limit": 5,
+            "priority_order": ["high", "medium", "low"],
+            "retry_after_days": 3
+        }
+    }
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        # 合并到默认值字典（确保缺少字段时有兜底）
+        merged = {**defaults, **config}
+        merged["scheduler"] = {**defaults["scheduler"], **config.get("scheduler", {})}
+        return merged
+    except:
+        return defaults
+
 
 def main():
+    config = load_config()
+    scheduler_cfg = config["scheduler"]
+    DAILY_LIMIT = scheduler_cfg["daily_limit"]
+    RETRY_AFTER_DAYS = scheduler_cfg["retry_after_days"]
+    PRIORITY_WEIGHT = {p: i for i, p in enumerate(scheduler_cfg["priority_order"])}
+    
     print("=" * 50)
     print(f"📅 自动化外链发布每日调度系统 - {datetime.date.today()}")
+    print(f"   每日配额: {DAILY_LIMIT} 条 | 失败重试间隔: {RETRY_AFTER_DAYS} 天")
     print("=" * 50)
     
     manager = GoogleSheetsManager()
@@ -18,64 +44,88 @@ def main():
     if len(all_data) <= 1:
         print("❌ 表格中没有数据！")
         return
-        
-    headers = all_data[0]
-    tasks = all_data[1:] # 剔除第一行标题
     
-    # 获取列对应的索引
+    tasks = all_data[1:]  # 剔除标题行
+    
     status_idx = manager.col_map['Status']
     priority_idx = manager.col_map['Priority']
     
-    pending_tasks = []
+    today = datetime.date.today()
+    candidate_tasks = []
     
-    # 注意：我们的行索引需要 +1（因为去掉了标题行），然后再传给 Google API
     for i, row in enumerate(tasks):
-        # 处理空列表（API 返回的结尾空列会截断）
         row_status = row[status_idx] if len(row) > status_idx else 'pending'
         row_priority = row[priority_idx] if len(row) > priority_idx else 'medium'
+        api_row_index = i + 1
         
+        # 规则 1：pending 状态的任务直接纳入候选
         if row_status == 'pending':
-            # 保存任务并带上真实的行索引 (i+1 是实际数据行，在 API 里标题行是 index 0，数据行是从 index 1 开始)
-            # 在 API 里： 第一行标题 index=0，第一条数据 index=1
-            api_row_index = i + 1 
-            pending_tasks.append({
+            candidate_tasks.append({
                 'row_index': api_row_index,
                 'priority': row_priority,
-                'data': row
+                'data': row,
+                'type': 'pending'
             })
-            
-    print(f"📊 发现待处理任务：{len(pending_tasks)} 个。")
-    
-    if len(pending_tasks) == 0:
-        print("✅ 所有外链任务已完成！系统无需运行。")
-        return
         
+        # 规则 2：failed 状态且超过 retry_after_days 天的任务也重新纳入候选
+        elif row_status == 'failed':
+            retry_at_col = manager.col_map.get('retry_at')
+            if retry_at_col is not None:
+                retry_at_str = row[retry_at_col] if len(row) > retry_at_col else ''
+                if retry_at_str:
+                    try:
+                        retry_at_date = datetime.date.fromisoformat(retry_at_str)
+                        if today >= retry_at_date:
+                            candidate_tasks.append({
+                                'row_index': api_row_index,
+                                'priority': row_priority,
+                                'data': row,
+                                'type': 'retry'
+                            })
+                    except:
+                        pass
+                else:
+                    # 没有 retry_at 的旧 failed 任务，也纳入
+                    candidate_tasks.append({
+                        'row_index': api_row_index,
+                        'priority': row_priority,
+                        'data': row,
+                        'type': 'retry'
+                    })
+    
+    pending_count = sum(1 for t in candidate_tasks if t['type'] == 'pending')
+    retry_count = sum(1 for t in candidate_tasks if t['type'] == 'retry')
+    print(f"📊 候选任务：{len(candidate_tasks)} 个（新任务 {pending_count} 个，重试任务 {retry_count} 个）")
+    
+    if not candidate_tasks:
+        print("✅ 今日无可处理任务！")
+        return
+    
     print("\n[2/3] 正在根据优先级自动挑选今日任务...")
+    # 排序：优先 pending > retry，同类型内按 priority 权重排序
+    candidate_tasks.sort(key=lambda x: (
+        0 if x['type'] == 'pending' else 1,  # pending 优先于 retry
+        PRIORITY_WEIGHT.get(x['priority'].lower(), 99)
+    ))
     
-    # 按照优先级排序：high > medium > low
-    # 假设如果表格里为空，给它一个默认的排序权重
-    priority_weight = {'high': 1, 'medium': 2, 'low': 3}
-    pending_tasks.sort(key=lambda x: priority_weight.get(x['priority'].lower(), 2))
-    
-    # 挑选出当天的份额
-    today_tasks = pending_tasks[:DAILY_LIMIT]
-    print(f"🎯 为今天挑选了 {len(today_tasks)} 个任务 (配额限制 {DAILY_LIMIT})")
+    today_tasks = candidate_tasks[:DAILY_LIMIT]
+    print(f"🎯 为今天挑选了 {len(today_tasks)} 个任务（配额限制 {DAILY_LIMIT}）")
     
     print("\n[3/3] 正在将今日任务状态标记为进行中，分配批次号...")
-    batch_token = f"Batch-{datetime.date.today().strftime('%Y%m%d')}"
+    batch_token = f"Batch-{today.strftime('%Y%m%d')}"
     
     for task in today_tasks:
         idx = task['row_index']
-        # 核心更新：把状态由 pending 改为 in_progress，并登记当天的批次号
         updates = {
             'Status': 'in_progress',
             'Daily_Batch': batch_token,
-            'Execution_Date': datetime.date.today().strftime('%Y-%m-%d')
+            'Execution_Date': today.strftime('%Y-%m-%d')
         }
         manager.update_task(idx, updates)
-        time.sleep(1) # 休眠以免触发 Google API 并发限制
-        
-    print("\n✨ 调度完成！请进入你的 Google Sheets 查看状态变为黄颜色的就是今天的猎物！")
+        time.sleep(1)
+    
+    print("\n✨ 调度完成！Google Sheets 中黄色高亮的行就是今天的目标！")
+
 
 if __name__ == '__main__':
     main()
