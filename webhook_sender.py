@@ -10,9 +10,38 @@ class WebhookSender:
         """初始化 Webhook 发送器"""
         self.webhook_url = webhook_url
 
-    def send_summary(self, title: str, summary: dict) -> bool:
-        """发送汇总消息卡片"""
+    def send_detailed_report(self, title: str, summary: dict) -> bool:
+        """发送详细消息卡片"""
         try:
+            success_list = summary.get("success", [])
+            failed_list = summary.get("failed", [])
+            
+            # 构建富文本Markdown
+            md_lines = []
+            
+            if success_list:
+                md_lines.append(f"**✅ 成功任务 ({len(success_list)} 条)：**")
+                for i, item in enumerate(success_list, 1):
+                    md_lines.append(f"{i}. **网址**: {item.get('url', '')}")
+                    md_lines.append(f"   **评论格式**: {item.get('format', '')}")
+                md_lines.append("")
+                
+            if failed_list:
+                md_lines.append(f"**❌ 失败任务 ({len(failed_list)} 条)：**")
+                for i, item in enumerate(failed_list, 1):
+                    md_lines.append(f"{i}. **网址**: {item.get('url', '')}")
+                    # 取原因中开头的部分避免过长
+                    reason = item.get('reason', '')
+                    if len(reason) > 50:
+                        reason = reason[:50] + "..."
+                    md_lines.append(f"   **失败原因**: {reason}")
+                md_lines.append("")
+                
+            if not success_list and not failed_list:
+                md_lines.append("今日无发帖记录。")
+                
+            content_md = "\n".join(md_lines)
+            
             # 组装卡片的核心元素
             card = {
                 "config": {"wide_screen_mode": True},
@@ -22,17 +51,8 @@ class WebhookSender:
                 },
                 "elements": [
                     {
-                        "tag": "div",
-                        "fields": [
-                            {
-                                "is_short": True,
-                                "text": {"tag": "lark_md", "content": f"**🤖 成功任务：**\n{summary.get('success', 0)} 条"}
-                            },
-                            {
-                                "is_short": True,
-                                "text": {"tag": "lark_md", "content": f"**❌ 失败任务：**\n{summary.get('failed', 0)} 条"}
-                            }
-                        ]
+                        "tag": "markdown",
+                        "content": content_md
                     },
                     {
                         "tag": "hr"

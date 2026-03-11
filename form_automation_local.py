@@ -359,7 +359,12 @@ def process_task(task_row, api_row_index, manager, browser):
             updates['retry_at'] = retry_date
     
     manager.update_task(api_row_index, updates)
-    return is_success
+    return {
+        "success": is_success,
+        "url": url,
+        "format": link_format,
+        "reason": result_msg
+    }
 
 
 
@@ -401,16 +406,16 @@ def main():
             browser_app = p.chromium.connect_over_cdp("http://localhost:9222")
             print("🤩 成功接管本地真实 Chrome！指纹认证已生效。\n")
             
-            success_count = 0
-            failed_count = 0
+            success_list = []
+            failed_list = []
             
             for idx, task in enumerate(today_tasks, start=1):
                 print(f"\n>>> 进度: {idx}/{len(today_tasks)}")
-                is_success = process_task(task['data'], task['row_index'], manager, browser_app)
-                if is_success:
-                    success_count += 1
+                res = process_task(task['data'], task['row_index'], manager, browser_app)
+                if res["success"]:
+                    success_list.append(res)
                 else:
-                    failed_count += 1
+                    failed_list.append(res)
             
             browser_app.close()
             
@@ -418,8 +423,8 @@ def main():
             from webhook_sender import create_webhook_sender
             sender = create_webhook_sender()
             if sender:
-                summary = {"success": success_count, "failed": failed_count}
-                sender.send_summary("🌍 外链自动化执行报告", summary)
+                summary = {"success": success_list, "failed": failed_list}
+                sender.send_detailed_report("🌍 外链自动化执行报告", summary)
             else:
                 print("\nℹ️ 未配置飞书 Webhook，跳过通知。")
         
