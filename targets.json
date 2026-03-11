@@ -1,0 +1,18 @@
+{
+    "targets": [
+        {
+            "url": "https://slideology.com",
+            "anchor_text": "presentation design services",
+            "description": "Slideology offers professional presentation design services, visual storytelling, and custom PowerPoint design to help businesses communicate with impact.",
+            "email": "slideology0816@gmail.com",
+            "active": false
+        },
+        {
+            "url": "https://bearclicker.net/",
+            "anchor_text": "bear clicker",
+            "description": "bear clicker, A new bear clicker game online, create unique bear compositions, experience fun sound effects, and immerse yourself",
+            "email": "slideology0816@gmail.com",
+            "active": true
+        }
+    ]
+}

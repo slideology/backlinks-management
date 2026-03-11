@@ -9,21 +9,42 @@ PROJECT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$PROJECT_DIR"
 
 echo "=================================================="
-echo "🤖 环节1: 正在为你打开携带你个人真实指纹的 Chrome 浏览器..."
+echo "🤖 环节1: 正在启动机器人的专属 Chrome（你的日常 Chrome 不受影响）"
 echo "=================================================="
 
-# 杀掉所有之前可能是正常打开的 Chrome (因为我们需要用调试端口启动它)
-pkill -9 "Google Chrome" 2>/dev/null
-sleep 1
 
-# 以极客模式 (调试端口 9222) 启动你 Mac 上自带的真实 Google Chrome!
-# 【重要】这里指定的是你真实的 Chrome 用户数据目录（~/Library/Application Support/Google/Chrome）
-# 这样启动的 Chrome 会带着你所有的账号登录、Cookie、书签、历史记录！
-REAL_CHROME_DATA="$HOME/Library/Application Support/Google/Chrome"
-/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
-    --remote-debugging-port=9222 \
-    --user-data-dir="$REAL_CHROME_DATA" \
-    --restore-last-session &
+# 【重要升级】机器人现在拥有自己的専属 Chrome！
+# 原来的做法是杀掉你的主 Chrome 然后重启，这次我们彻底改变策略：
+#   - 你的日常 Chrome 继续照常使用，完全不受影响
+#   - 机器人启动一个独立的第二个 Chrome 实例（使用专属账号目录 ~/ChromeAutoBot）
+#   - 两个 Chrome 实例互不干扰、和平共处！
+
+BOT_CHROME_DATA="$HOME/ChromeAutoBot"
+
+# 首次运行时自动创建机器人专属目录
+mkdir -p "$BOT_CHROME_DATA"
+
+# 检查机器人 Chrome 是否已在运行（避免重复启动）
+if curl -s http://localhost:9222/json/version > /dev/null 2>&1; then
+    echo "-> 机器人 Chrome 已在运行，无需重启。"
+else
+    echo "-> 正在启动机器人专属 Chrome（不影响你的日常 Chrome）..."
+    /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
+        --remote-debugging-port=9222 \
+        --user-data-dir="$BOT_CHROME_DATA" \
+        --no-first-run \
+        --no-default-browser-check &
+    
+    echo "-> 等待机器人 Chrome 就绪..."
+    sleep 4
+    
+    echo ""
+    echo "⚠️  【首次使用提示】"
+    echo "   如果这是第一次运行，请在刚刚弹出的 Chrome 窗口里"
+    echo "   登录你的专用发帖 Google 账号。"
+    echo "   登录完成后，按任意键继续..."
+    read -n 1 -s -r
+fi
 
 echo "-> Chrome 已在后台启动 (正在监听 9222 端口)，等待 3 秒钟加载..."
 sleep 3

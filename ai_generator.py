@@ -92,6 +92,87 @@ def generate_comment(anchor_text, forum_topic=""):
         print(f"❌ Gemini 生成评论失败: {e}")
         return f"Thanks for sharing this great information! Really helpful. {anchor_text}"
 
+
+def load_active_target(targets_path="targets.json"):
+    """
+    从 targets.json 读取 active=true 的推广目标。
+    如果没有 active 的目标，返回 None。
+    这样可以支持多个目标网站，切换时只需在 json 里改 active 字段。
+    """
+    import json, os
+    path = targets_path if os.path.isabs(targets_path) else os.path.join(os.path.dirname(__file__), targets_path)
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        for target in data.get("targets", []):
+            if target.get("active", False):
+                return target
+    except Exception as e:
+        print(f"⚠️ 读取 targets.json 失败: {e}")
+    return None
+
+
+def build_anchor_texts(anchor_text: str, target_url: str) -> dict:
+    """
+    根据用户提供的固定锚文本词和目标链接，生成四种格式的锚文本代码：
+    - html: <a href="url">anchor_text</a>
+    - bbcode: [url=url]anchor_text[/url]
+    - markdown: [anchor_text](url)
+    - url_field: 直接返回 url
+    
+    返回一个字典，包含所有格式
+    """
+    return {
+        "html":      f'<a href="{target_url}">{anchor_text}</a>',
+        "bbcode":    f'[url={target_url}]{anchor_text}[/url]',
+        "markdown":  f'[{anchor_text}]({target_url})',
+        "url_field": target_url
+    }
+
+
+def get_anchor_for_format(anchor_text: str, link_format: str, target_url: str) -> str:
+    """
+    根据 link_format 返回对应格式的锚文本代码。
+    若 link_format 未知，默认返回 HTML 格式。
+    """
+    texts = build_anchor_texts(anchor_text, target_url)
+    fmt = link_format.lower().strip() if link_format else "url_field"
+    return texts.get(fmt, texts["html"])
+
+
+def generate_comment_for_target(target: dict, forum_topic: str = "") -> str:
+    """
+    根据 targets.json 中的推广目标，用固定锚文本的 Markdown 格式生成一段自然评论。
+    (评论内容由 AI 生成，锚文本词固定不变)
+    """
+    anchor_text = target.get("anchor_text", "click here")
+    target_url  = target.get("url", "")
+    description = target.get("description", "")
+    
+    # 用 Markdown 格式的锚文本嵌入到评论中（最通用的格式）
+    anchor_md = f"[{anchor_text}]({target_url})"
+    
+    prompt = f"""
+你是一个真实的互联网用户，正在一个外语论坛或博客上留言评论。
+{'论坛/博客的主题是：' + forum_topic if forum_topic else ''}
+{'关于我们推广网站的描述：' + description if description else ''}
+
+请用英文写 2-3 句友善的、符合语境的评论，并在末尾自然地融入下面这个链接（格式不能改动）：
+{anchor_md}
+
+要求：
+1. 语气像真人，不要太商业化
+2. 只返回评论内容，不要加任何解释
+3. 锚文本部分必须原封不动地保留：{anchor_md}
+"""
+    try:
+        response = client.models.generate_content(model=MODEL_ID, contents=prompt)
+        return response.text.strip()
+    except Exception as e:
+        print(f"❌ Gemini 生成评论失败: {e}")
+        return f"Really enjoyed this article, thanks for sharing! Check out [{anchor_text}]({target_url}) too."
+
+
 if __name__ == "__main__":
     # 测试代码
     print("正在测试最新 Gemini API 连通性...")

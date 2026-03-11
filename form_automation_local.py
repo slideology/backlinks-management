@@ -185,12 +185,26 @@ def process_task(task_row, api_row_index, manager, browser):
     
     # 步骤 1：AI 生成文案
     print("  [1/3] 🤖 AI 正在生成外链推广文案...")
-    keywords = task_row[manager.col_map['Keywords']]
-    if not keywords or keywords.strip() == "":
-        keywords = analyze_keywords(MY_TARGET_WEBSITE)
+    # ===== 优先读取 targets.json 中配置好的固定锚文本 =====
+    from ai_generator import load_active_target, get_anchor_for_format, generate_comment_for_target
     
-    anchor_text = generate_anchor_text(keywords, link_format, MY_TARGET_WEBSITE)
-    comment_content = generate_comment(anchor_text)
+    active_target = load_active_target()
+    
+    if active_target:
+        # ✅ 有配置文件：用固定锚文本，只让 AI 生成评论
+        print(f"  📋 使用 targets.json 配置：锚文本='{active_target['anchor_text']}' -> {active_target['url']}")
+        target_url   = active_target["url"]
+        anchor_text  = get_anchor_for_format(active_target["anchor_text"], link_format, target_url)
+        comment_content = generate_comment_for_target(active_target)
+    else:
+        # ⚠️ 无配置文件：退回旧逻辑，让 AI 自己生成锚文本
+        print("  ⚠️ 未找到 targets.json，退回 AI 自动生成锚文本模式")
+        target_url = MY_TARGET_WEBSITE
+        keywords = task_row[manager.col_map['Keywords']] if len(task_row) > manager.col_map['Keywords'] else ""
+        if not keywords or keywords.strip() == "":
+            keywords = analyze_keywords(MY_TARGET_WEBSITE)
+        anchor_text     = generate_anchor_text(keywords, link_format, MY_TARGET_WEBSITE)
+        comment_content = generate_comment(anchor_text)
     
     # 步骤 2：自动发帖（带重试机制）
     print("  [2/3] 🌐 开始接管真实 Chrome 进行自动发帖...")
@@ -206,8 +220,7 @@ def process_task(task_row, api_row_index, manager, browser):
     from datetime import datetime, timedelta
     
     updates = {
-        'Target_Website': MY_TARGET_WEBSITE,
-        'Keywords': keywords,
+        'Target_Website': active_target["url"] if active_target else MY_TARGET_WEBSITE,
         'Anchor_Text': anchor_text,
         'Comment_Content': comment_content,
         'Notes': result_msg
@@ -218,13 +231,13 @@ def process_task(task_row, api_row_index, manager, browser):
         updates['Success_URL'] = url
     else:
         updates['Status'] = 'failed'
-        # 【新增】写入 3 天后的重试日期，让 scheduler 到时候重新捞出来
         retry_date = (datetime.now() + timedelta(days=3)).strftime('%Y-%m-%d')
         if 'retry_at' in manager.col_map:
             updates['retry_at'] = retry_date
     
     manager.update_task(api_row_index, updates)
     return is_success
+
 
 
 # =====================================================================
