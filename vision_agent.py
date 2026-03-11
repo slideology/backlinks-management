@@ -143,7 +143,7 @@ def try_post_via_vision(page: Page, comment_content: str) -> tuple[bool, str]:
             
             # 引入刚刚在 form_automation_local.py 里写好的真实结果验证逻辑
             from form_automation_local import _verify_post_success
-            is_success, msg = _verify_post_success(page)
+            is_success, msg = _verify_post_success(page, comment_content)
             if is_success:
                 return True, f"Vision AI 视觉定位成功！并验证发帖成功: {msg}"
             else:
