@@ -114,8 +114,12 @@ def auto_post_content(page: Page, comment_content: str, url: str, max_retries: i
 def _try_dom_post(page: Page, comment_content: str) -> tuple[bool, str]:
     """
     Layer 1 内部函数：使用传统 DOM 方式寻找评论框并填写提交
+    覆盖三种情况：
+    方式 1 - 主页面的 <textarea>
+    方式 2 - 主页面的 contenteditable 富文本框
+    方式 3 - 嵌套在 iframe 里的评论框（Blogger / Disqus / WordPress 常用）
     """
-    # 方式 1：传统 textarea
+    # 方式 1：主页面传统 textarea
     textareas = page.locator('textarea:visible')
     if textareas.count() > 0:
         print("  👁️ 找到 <textarea> 输入框，正在填写...")
@@ -125,7 +129,7 @@ def _try_dom_post(page: Page, comment_content: str) -> tuple[bool, str]:
         time.sleep(1)
         return _try_submit(page)
     
-    # 方式 2：现代 contenteditable 富文本框
+    # 方式 2：主页面 contenteditable 富文本框
     content_editables = page.locator('[contenteditable="true"]:visible')
     if content_editables.count() > 0:
         print("  👁️ 找到 contenteditable 富文本评论框，正在填写...")
@@ -137,7 +141,75 @@ def _try_dom_post(page: Page, comment_content: str) -> tuple[bool, str]:
         time.sleep(1)
         return _try_submit(page)
     
-    return False, "Layer 1: 未找到 textarea 或 contenteditable 评论框"
+    # 方式 3：遍历所有 iframe，在 iframe 内部寻找评论框
+    # Blogger、Disqus、WordPress 等平台的评论框通常被嵌套在 iframe 里
+    # 普通的 page.locator 无法穿透 iframe，必须分别访问每个 frame
+    all_frames = page.frames
+    if len(all_frames) > 1:  # 有 iframe 存在
+        print(f"  🔍 主页面未找到评论框，开始遍历 {len(all_frames)-1} 个 iframe...")
+        for i, frame in enumerate(all_frames[1:], 1):  # 跳过主 frame
+            try:
+                frame_url = frame.url
+                print(f"  📦 检查 iframe #{i}: {frame_url[:60]}...")
+                
+                # 在 iframe 内找 textarea
+                frame_textareas = frame.locator('textarea:visible')
+                if frame_textareas.count() > 0:
+                    print(f"  👁️ 在 iframe #{i} 内找到 <textarea>，正在填写...")
+                    ft = frame_textareas.first
+                    ft.click(timeout=5000)  # 直接 click，不用 scroll（跨域 iframe 不支持滚动）
+                    time.sleep(0.3)
+                    ft.fill(comment_content)
+                    time.sleep(1)
+                    return _try_submit_in_frame(frame, page)
+                
+                # 在 iframe 内找 contenteditable
+                frame_editables = frame.locator('[contenteditable="true"]:visible')
+                if frame_editables.count() > 0:
+                    print(f"  👁️ 在 iframe #{i} 内找到 contenteditable，正在填写...")
+                    fe = frame_editables.first
+                    fe.click(timeout=5000)  # 直接 click，不用 scroll
+                    time.sleep(0.3)
+                    fe.type(comment_content, delay=30)
+                    time.sleep(1)
+                    return _try_submit_in_frame(frame, page)
+                    
+            except Exception as e:
+                print(f"  ⚠️ 访问 iframe #{i} 失败（跨域限制或其他原因）: {str(e)[:60]}")
+                continue
+    
+    return False, "Layer 1: 主页面及所有 iframe 中均未找到评论输入框"
+
+
+def _try_submit_in_frame(frame, page: Page) -> tuple[bool, str]:
+    """
+    在 iframe 内部寻找提交按钮并点击。
+    找不到时尝试在主页面补找（某些博客的提交按钮在 iframe 外面）。
+    """
+    button_selectors = [
+        'input[type="submit"]',
+        'button[type="submit"]',
+        'button:has-text("Post")',
+        'button:has-text("Publish")',
+        'button:has-text("Comment")',
+        'button:has-text("Submit")',
+        'a:has-text("Post Comment")',
+    ]
+    # 先在 iframe 内部找提交按钮
+    for selector in button_selectors:
+        try:
+            btn = frame.locator(selector)
+            if btn.count() > 0 and btn.first.is_visible():
+                print(f"  👉 在 iframe 内找到提交按钮 [{selector}]，准备点击...")
+                btn.first.click()
+                page.wait_for_timeout(5000)
+                return True, "在 iframe 内成功填写并提交评论！"
+        except:
+            continue
+    
+    # iframe 里没找到，退回到主页面找提交按钮
+    print("  🔄 iframe 内未找到提交按钮，尝试主页面...")
+    return _try_submit(page)
 
 
 def _try_submit(page: Page) -> tuple[bool, str]:
