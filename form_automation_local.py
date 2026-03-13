@@ -1,7 +1,29 @@
 import time
+import json
 import re
-from playwright.sync_api import sync_playwright, Page
+from playwright.sync_api import sync_playwright, Page, Frame
 
+# 错误信息中文化查找表
+ERROR_TRANSLATIONS = {
+    "Timeout": "网络连接超时，网页加载过慢",
+    "ERR_NAME_NOT_RESOLVED": "无法解析网址，可能网站已挂掉",
+    "ERR_CONNECTION_REFUSED": "网站拒绝连接，服务器可能宕机了",
+    "strict mode violation": "页面存在多个同样的输入框，识别混淆",
+    "Target closed": "浏览器窗口意外关闭",
+    "is not a function": "网页脚本执行出错",
+    "waiting for selector": "在页面上没找到对应的输入区域",
+    "net::ERR": "底层网络错误",
+    "Protocol error": "浏览器通讯故障",
+    "Execution context was destroyed": "页面正在刷新或已跳转，操作失效"
+}
+
+def translate_error(error_msg: str) -> str:
+    """将英文异常转换为白话中文"""
+    error_str = str(error_msg)
+    for eng, chn in ERROR_TRANSLATIONS.items():
+        if eng.lower() in error_str.lower():
+            return f"{chn} ({eng})"
+    return error_str
 from gws_integration import GoogleSheetsManager
 from ai_generator import analyze_keywords, generate_anchor_text, generate_comment
 
@@ -102,11 +124,11 @@ def auto_post_content(page: Page, comment_content: str, url: str, max_retries: i
             if vision_result[0]:
                 return vision_result
             
-            last_error = vision_result[1]
+            last_error = translate_error(vision_result[1])
             
         except Exception as e:
-            last_error = str(e)
-            print(f"  ⚠️ 发生异常（尝试 {attempt + 1}/{max_retries}）: {e}")
+            last_error = translate_error(str(e))
+            print(f"  ⚠️ 发生异常（尝试 {attempt + 1}/{max_retries}）: {last_error}")
     
     return False, last_error
 
