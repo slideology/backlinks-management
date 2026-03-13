@@ -24,16 +24,29 @@ class WebhookSender:
                 for i, item in enumerate(success_list, 1):
                     md_lines.append(f"{i}. **网址**: {item.get('url', '')}")
                     md_lines.append(f"   **评论格式**: {item.get('format', '')}")
+                    if item.get('used_vision'):
+                        md_lines.append("   **执行方式**: Vision 兜底")
+                    if item.get('feishu_row'):
+                        md_lines.append(f"   **飞书记录**: 第 {item.get('feishu_row')} 行")
+                    # 新增：显示成功的具体判定详情（例如是否在审核）
+                    reason = item.get('reason', '')
+                    if reason:
+                        md_lines.append(f"   **结果详情**: {reason}")
                 md_lines.append("")
                 
             if failed_list:
                 md_lines.append(f"**❌ 失败任务 ({len(failed_list)} 条)：**")
                 for i, item in enumerate(failed_list, 1):
                     md_lines.append(f"{i}. **网址**: {item.get('url', '')}")
+                    category = item.get('diagnostic_category', '')
+                    if category:
+                        md_lines.append(f"   **失败分类**: {category}")
+                    if item.get('feishu_row'):
+                        md_lines.append(f"   **飞书记录**: 第 {item.get('feishu_row')} 行")
                     # 取原因中开头的部分避免过长
                     reason = item.get('reason', '')
-                    if len(reason) > 50:
-                        reason = reason[:50] + "..."
+                    if len(reason) > 80:
+                        reason = reason[:80] + "..."
                     md_lines.append(f"   **失败原因**: {reason}")
                 md_lines.append("")
                 

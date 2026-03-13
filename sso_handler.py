@@ -41,32 +41,36 @@ def detect_and_do_google_sso(page: Page, timeout_ms: int = 3000) -> bool:
             btn = page.locator(selector).first
             if btn.is_visible(timeout=timeout_ms):
                 print(f"  🔑 发现 Google 快捷登录入口 [{selector}]，准备点击...")
-                btn.click()
-                time.sleep(2)  # 等待弹窗出现
+                context = page.context
+                popup = None
+                try:
+                    with context.expect_page(timeout=5000) as new_page_info:
+                        btn.click()
+                    popup = new_page_info.value
+                except Exception:
+                    btn.click()
+                time.sleep(2)
                 
                 # 尝试检测并点击 Google 账号选择弹框
                 # Google 的账号选择弹框通常会打开一个新标签页或弹窗
-                return _handle_google_account_selection(page)
+                return _handle_google_account_selection(page, popup)
         except:
             continue
     
     return False
 
 
-def _handle_google_account_selection(page: Page) -> bool:
+def _handle_google_account_selection(page: Page, popup: Page = None) -> bool:
     """
     内部函数：处理 Google 账号选择弹框。
     因为本地 Chrome 已登录 Google，找到并点击默认账号完成授权。
     """
     try:
-        # 等待新弹窗出现（最多 5 秒）
-        context = page.context
-        
-        # 有些网站用 popup，有些用 new tab
-        with context.expect_page(timeout=5000) as new_page_info:
-            pass
-        
-        popup = new_page_info.value
+        if popup is None:
+            context = page.context
+            with context.expect_page(timeout=5000) as new_page_info:
+                pass
+            popup = new_page_info.value
         popup.wait_for_load_state('networkidle', timeout=10000)
         
         # 在 Google 账号选择页面上，找到并点击第一个可用账号

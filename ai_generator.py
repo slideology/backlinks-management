@@ -140,17 +140,17 @@ def get_anchor_for_format(anchor_text: str, link_format: str, target_url: str) -
     return texts.get(fmt, texts["html"])
 
 
-def generate_comment_for_target(target: dict, forum_topic: str = "") -> str:
+def generate_comment_for_target(target: dict, link_format: str = "markdown", forum_topic: str = "") -> str:
     """
-    根据 targets.json 中的推广目标，用固定锚文本的 Markdown 格式生成一段自然评论。
+    根据 targets.json 中的推广目标，用指定格式（html/bbcode/markdown）生成一段自然评论。
     (评论内容由 AI 生成，锚文本词固定不变)
     """
     anchor_text = target.get("anchor_text", "click here")
     target_url  = target.get("url", "")
     description = target.get("description", "")
     
-    # 用 Markdown 格式的锚文本嵌入到评论中（最通用的格式）
-    anchor_md = f"[{anchor_text}]({target_url})"
+    # 根据指定格式获取锚链接片段
+    anchor_code = get_anchor_for_format(anchor_text, link_format, target_url)
     
     prompt = f"""
 你是一个真实的互联网用户，正在一个外语论坛或博客上留言评论。
@@ -158,19 +158,19 @@ def generate_comment_for_target(target: dict, forum_topic: str = "") -> str:
 {'关于我们推广网站的描述：' + description if description else ''}
 
 请用英文写 2-3 句友善的、符合语境的评论，并在末尾自然地融入下面这个链接（格式不能改动）：
-{anchor_md}
+{anchor_code}
 
 要求：
 1. 语气像真人，不要太商业化
 2. 只返回评论内容，不要加任何解释
-3. 锚文本部分必须原封不动地保留：{anchor_md}
+3. 锚文本部分必须原封不动地保留：{anchor_code}
 """
     try:
         response = client.models.generate_content(model=MODEL_ID, contents=prompt)
         return response.text.strip()
     except Exception as e:
         print(f"❌ Gemini 生成评论失败: {e}")
-        return f"Really enjoyed this article, thanks for sharing! Check out [{anchor_text}]({target_url}) too."
+        return f"Really enjoyed this article, thanks for sharing! Check out {anchor_code} too."
 
 
 if __name__ == "__main__":

@@ -3,3 +3,6 @@ token.json
 __pycache__/
 *.pyc
 .DS_Store
+artifacts/
+.feishu_user_token.json
+.translation_cache.json

@@ -1,7 +1,9 @@
 import os
 import time
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from google.oauth2.credentials import Credentials
+from sheet_localization import GOOGLE_HEADERS, localize_basic_value, normalize_google_row
 
 # --- 配置常量 ---
 # 这两个从上一步 import_to_sheets.py 跑完后生成的配置里读取
@@ -36,21 +38,16 @@ class GoogleSheetsManager:
         self.service = get_sheets_service()
         self.spreadsheet_id = get_spreadsheet_id()
         self.sheet_id = self.get_sheet_id()
+        self.headers = GOOGLE_HEADERS
         # 定义列索引映射，方便程序通过名字而不是通过数字来访问数据
-        self.col_map = {
-            'ID': 0, 'Type': 1, 'URL': 2, 'Discovered_From': 3, 'Has_Captcha': 4,
-            'Link_Strategy': 5, 'Link_Format': 6, 'Has_URL_Field': 7, 'Status': 8,
-            'Priority': 9, 'Target_Website': 10, 'Keywords': 11, 'Anchor_Text': 12,
-            'Comment_Content': 13, 'Execution_Date': 14, 'Success_URL': 15, 'Notes': 16,
-            'Last_Updated': 17, 'Daily_Batch': 18
-        }
+        self.col_map = {name: index for index, name in enumerate(self.headers)}
 
     def get_sheet_id(self):
         """获取第一个 sheet 的真实 ID (而不是硬编码为 0)"""
         spreadsheet = self.service.spreadsheets().get(spreadsheetId=self.spreadsheet_id).execute()
         return spreadsheet['sheets'][0]['properties']['sheetId']
 
-    def read_all_tasks(self):
+    def read_all_tasks_raw(self):
         """读取整张表的所有数据（包括标题行）"""
         sheet = self.service.spreadsheets()
         result = sheet.values().get(
@@ -58,6 +55,16 @@ class GoogleSheetsManager:
             range=SHEET_RANGE
         ).execute()
         return result.get('values', [])
+
+    def read_all_tasks(self):
+        """读取整张表数据，并把关键枚举字段规范化为程序内部使用的英文值。"""
+        rows = self.read_all_tasks_raw()
+        if len(rows) <= 1:
+            return rows
+        normalized_rows = [rows[0]]
+        for row in rows[1:]:
+            normalized_rows.append(normalize_google_row(row))
+        return normalized_rows
 
     def update_task(self, row_index, updates):
         """
@@ -72,6 +79,7 @@ class GoogleSheetsManager:
                 continue
                 
             col_idx = self.col_map[col_name]
+            stored_value = localize_basic_value(col_name, value)
             
             # 使用 update cells 接口精确定位我们要修改的那一个格子
             requests.append({
@@ -83,7 +91,7 @@ class GoogleSheetsManager:
                         'startColumnIndex': col_idx,
                         'endColumnIndex': col_idx + 1
                     },
-                    'rows': [{ 'values': [{'userEnteredValue': {'stringValue': str(value)}}] }],
+                    'rows': [{ 'values': [{'userEnteredValue': {'stringValue': str(stored_value)}}] }],
                     'fields': 'userEnteredValue'
                 }
             })
@@ -107,11 +115,20 @@ class GoogleSheetsManager:
                 })
 
         if requests:
-            self.service.spreadsheets().batchUpdate(
-                spreadsheetId=self.spreadsheet_id,
-                body={'requests': requests}
-            ).execute()
-            print(f"✅ 第 {row_index + 1} 行已更新：{updates}")
+            for attempt in range(5):
+                try:
+                    self.service.spreadsheets().batchUpdate(
+                        spreadsheetId=self.spreadsheet_id,
+                        body={'requests': requests}
+                    ).execute()
+                    print(f"✅ 第 {row_index + 1} 行已更新：{updates}")
+                    break
+                except HttpError as exc:
+                    if exc.resp.status != 429 or attempt == 4:
+                        raise
+                    wait_seconds = min(15 * (attempt + 1), 60)
+                    print(f"⏳ Google Sheets 写入限流，{wait_seconds} 秒后重试第 {row_index + 1} 行...")
+                    time.sleep(wait_seconds)
 
 if __name__ == '__main__':
     # 简单的测试一下能不能连通
