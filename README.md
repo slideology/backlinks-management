@@ -34,6 +34,56 @@
 
 ---
 
+## ⏰ 每日自动运行
+
+项目现在已经支持 **macOS `launchd` 每天 10:15 自动启动**。
+
+- 定时任务入口：[/Users/dahuang/Library/LaunchAgents/com.backlink.robot.daily.plist](/Users/dahuang/Library/LaunchAgents/com.backlink.robot.daily.plist)
+- 安装脚本：[/Users/dahuang/CascadeProjects/test/backlink-management/scripts/install_launch_agent.sh](/Users/dahuang/CascadeProjects/test/backlink-management/scripts/install_launch_agent.sh)
+- 自动运行日志目录：[/Users/dahuang/CascadeProjects/test/backlink-management/logs](/Users/dahuang/CascadeProjects/test/backlink-management/logs)
+
+当前自动运行策略是：
+- 每天本地时间 **10:15** 自动执行 `Start_Robot.command`
+- 自动模式下会跳过首次登录确认提示，不会卡在终端等待输入
+- 调度器会按“**今天还差多少成功数**”动态补任务池，而不是只拿固定 1 条
+- 发帖主程序会在“**当天成功 10 条**”后自动停止
+- 每日总控结束后会自动刷新一份飞书中文运营总表，供人工查看来源、评论、目标站和历史去重信息
+
+如果你想立刻手动触发一次，不等到第二天 10 点，可以执行：
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.backlink.robot.daily
+```
+
+首次正式自动运行前，建议先手动启动一次机器人 Chrome，确认专用发帖账号已经登录。
+
+---
+
+## 📘 中文运营总表
+
+项目现在会额外维护一份**中文运营总表**，专门给人工查看，不直接参与自动化主链路。
+
+- 工作簿链接：[外链运营总表](https://gcnbv8csilt1.feishu.cn/sheets/XvM6s6XrRhConltP1pUcaLpznDc)
+- 状态文件：[/Users/dahuang/CascadeProjects/test/backlink-management/artifacts/reporting_workbook/state.json](/Users/dahuang/CascadeProjects/test/backlink-management/artifacts/reporting_workbook/state.json)
+- 手动同步脚本：[/Users/dahuang/CascadeProjects/test/backlink-management/sync_reporting_workbook.py](/Users/dahuang/CascadeProjects/test/backlink-management/sync_reporting_workbook.py)
+
+这份工作簿当前包含 5 个中文 sheet：
+- `来源主表`：一行一个来源 URL，展示当前应发站点、最近成功站点、下次可推进时间和各站点展开状态
+- `站点发布状态表`：一行 = 一个 `来源 URL x 目标站` 的当前状态，是新的调度事实表
+- `目标站表`：维护当前推广站点、站点标识、优先级、冷却天数、每日成功目标与是否启用
+- `旧表历史事实表`：把旧飞书历史库标准化成“历史已成功事实”，用于初始化新状态模型
+- `旧表全量来源库`：保留旧表高分来源与原始标记，供历史核对和后续补数
+
+展示规则已经收口为：
+- 表头全部中文
+- URL、域名、目标网站 URL 保留原值
+- `评论内容` 保留原语言
+- `评论内容中文` 单独提供中文核查
+- 站点标识已统一改成域名全称，例如 `bearclicker.net`、`nanobananaimage.org`
+- `slideology.com` 已从真实投放链路和运营总表中移除，仅保留在少量测试代码里作为示例
+
+---
+
 ## 🔧 给黑客/开发者的配置提示
 
 如果您是从另一台电脑重新拉取这个仓库，您需要配置好核心驱动密码：
@@ -48,6 +98,9 @@
 
 *更详细的表格各列定义、条件格式化请参阅此文件：[backlink_sheet_structure.md](./backlink_sheet_structure.md)*
 
+如需给其他开发者解释“这套系统是怎么实现出来的”，请直接参考：
+[SYSTEM_IMPLEMENTATION_GUIDE.md](/Users/dahuang/CascadeProjects/test/backlink-management/SYSTEM_IMPLEMENTATION_GUIDE.md)
+
 ## ✨ 总结
 系统设计中采用 **真实本地浏览器** 接管是一个对抗外链反作弊极佳的解法，结合了 **AI 造文** 让系统无需等待纯人工而实现真正的 Auto Pilot。
 在由于不同网站建站千奇百怪、前端 React / Vue 技术栈隔离导致的识别失败任务会在 `Notes` 内详尽抛出原因，让运营者事后追溯更加容易。
@@ -58,6 +111,140 @@
 - 默认关闭 Google SSO 自动登录分支，减少新窗口弹出和前台打扰。
 - Vision 失败现场会保存在 `artifacts/vision/日期/` 目录，包含截图、模型原始返回和解析后的 JSON。
 - 飞书侧现已拆成两层：`webhook_sender.py` 负责机器人通知，`feishu_integration.py` 负责飞书表格记录。
+- `daily_scheduler.py` 已按“当天成功目标”动态补任务，而不是固定只挑极少量任务。
+- `form_automation_local.py` 现在按“**当天成功 10 条即停止**”计算，不再把历史累计成功数算进当日停止条件。
+- `Start_Robot.command` 已支持 `AUTO_MODE=1`，适合 `launchd`/定时任务无交互运行。
+
+---
+
+## 📅 2026-03-20 工作日志
+
+### ✅ 最近完成
+
+#### 1. 飞书升级为唯一业务事实源
+- 调度与展示主链路已经切到飞书，不再依赖 Google Sheets 作为业务状态真源。
+- 新增 [feishu_workbook.py](/Users/dahuang/CascadeProjects/test/backlink-management/feishu_workbook.py)、[backlink_state.py](/Users/dahuang/CascadeProjects/test/backlink-management/backlink_state.py)、[sync_reporting_workbook.py](/Users/dahuang/CascadeProjects/test/backlink-management/sync_reporting_workbook.py) 作为新的状态层与同步入口。
+- 运营总表已经收口为 5 张表：`来源主表`、`站点发布状态表`、`目标站表`、`旧表历史事实表`、`旧表全量来源库`。
+
+#### 2. 多站点推进规则正式落地
+- 每个站点按 `目标站表` 的优先级顺序独立推进。
+- 每站每天单独计算成功数，达到 `10` 条即当天停止。
+- 同一来源在前序站点成功后，后续站点按冷却时间推进；若旧历史只有成功标记没有成功时间，也会视为可推进事实。
+- 调度器会优先挑“已被其他站成功过”的来源，不够时再补新来源。
+
+#### 3. 站点标识和目标站配置完成清理
+- 站点标识已从短别名 `b/n` 改为域名全称，当前真实站点统一为：
+  - `bearclicker.net`
+  - `nanobananaimage.org`
+- `slideology.com` 已从 `targets.json`、`目标站表`、`站点发布状态表` 中移除，不再参与真实投放。
+- 旧历史迁移逻辑已兼容短别名和新域名标识，避免后续同步把旧 `b/n` 再写回来。
+
+#### 4. `nanobananaimage.org` 执行链路关键问题已修复
+- 修复了 Python 3.9 下 [form_automation_local.py](/Users/dahuang/CascadeProjects/test/backlink-management/form_automation_local.py) 的类型注解兼容问题。
+- 修复了飞书富文本 `来源链接` 被当成字符串对象直接传给 `page.goto()` 的问题。
+- 修复了“字符串化富文本 URL”解析失败导致的 `Protocol error` 批量假失败问题。
+- 修复后，`nanobananaimage.org` 已经可以真正发出成功记录，不再是整轮统一协议错误。
+
+#### 5. 本轮 `nanobananaimage.org` 验证结果
+- 当前已验证至少 3 条当日成功记录。
+- 已确认成功样本更偏向标准 HTML 评论表单页面。
+- 失败样本主要集中在：
+  - `Vision 未识别到评论输入框坐标`
+  - `Vision 点击评论框后未能稳定输入`
+  - 个别慢站 `Timeout`
+
+### 📋 接下来待办
+
+#### 高优先级
+- [ ] 先把 `nanobananaimage.org` 当前残留的 `进行中` 任务清理为可重试状态，避免脏状态影响下一轮调度。
+- [ ] 针对 `Vision 未识别到评论框` 的高频站型补规则，优先看 Wix、MIT PubPub、普通 WordPress 评论区。
+- [ ] 针对 `Vision 点击后未能稳定输入` 增加“点击后焦点验证 + 二次输入 + 回退 DOM 检测”。
+
+#### 中优先级
+- [ ] 为 `Timeout` 类站点补更保守的等待和提交后验证策略，降低假失败。
+- [ ] 给 `daily_scheduler.py` 增加更明确的重试回收策略，让中断后的 `进行中` 记录自动回流。
+- [ ] 给失败样本按站型做标签，形成一套“先补哪个站最划算”的失败库。
+
+#### 低优先级
+- [ ] 清理测试代码里残留的 `slideology.com` 示例值，避免新同学读代码时混淆真实站点。
+- [ ] 把 README 的工作日志继续压缩成阶段性里程碑，减少历史日志过长的问题。
+
+---
+
+## 📅 2026-03-16 工作日志
+
+### ✅ 今日完成
+
+#### 1. 飞书表格正式打通（应用身份 + 用户身份）
+- 新增并验证了 `feishu_integration.py` 的真实写入能力，飞书表格不再只停留在机器人通知层。
+- 后续已切到**用户身份创建/写入表格**，新建的飞书表格可直接作为人工核查与台账使用。
+- Google Sheets 与飞书表格已完成一轮整表镜像同步。
+
+#### 2. 表格中文化与内容列语言策略收口
+- Google / 飞书表格除链接字段外，展示层基本收口为中文。
+- `Keywords / Anchor_Text / Comment_Content` 不再强制中文化，而是保留目标站点语言。
+- 新增 `Comment_Content_ZH` 列，用于人工核查评论内容中文翻译。
+
+#### 3. 评论生成链升级为“页面上下文 + 评论区上下文”
+- 评论生成不再只看标题，而是结合页面标题、摘要、正文摘要与评论区上下文。
+- AI 生成内容现在会更贴近原页面主题，减少泛化评论。
+- 历史内容已做过一轮回填，后续新写入默认带上 `Comment_Content_ZH`。
+
+#### 4. `Link_Format` 检测重构与批量回填
+- 检测逻辑已从“整页弱信号”改成“编辑器提示 + 历史评论 DOM”。
+- 新增 `plain_text_autolink`，用于表示“裸 URL 会自动变成链接”的站点。
+- `unknown` 默认兜底不再冒进回退到 `html`，而是走更保守的纯文本 URL 路径。
+
+#### 5. 第二轮 `unknown` 清理规则上线
+- 新增更宽松但可解释的 `html` 规则：**评论表单 + Website 字段 + 评论列表存在**。
+- 补充了评论块选择器：`.comment-entry`、`.comment-container`、`.commentContainer`、`.commentList`、`.media`。
+- 同时加入**硬跳过 URL 规则**，避免 profile/member/company/wiki/sound 等明显非文章页被误判。
+- 本轮批量回填后，`Link_Format=unknown` 已从 `87` 降到 `60`。
+- 当前剩余 `unknown` 中：
+  - `56` 条是 `profile` 型页面
+  - `4` 条是仍值得深挖的 `blog_comment` 页面
+
+#### 6. 真实链路验证
+- 真实浏览器跑通了至少 1 条新外链任务，Google / 飞书两边都已完成回写。
+- Vision 留痕、飞书写入、中文翻译列、`Link_Format` 回填都已实测走通。
+
+#### 7. Chrome DevTools MCP 已接入并验证
+- 已安装 `chrome-devtools-mcp`，同时保留两种模式：
+  - `chrome-devtools`：连接独立 `9222` 机器人 Chrome
+  - `chrome-devtools-auto`：通过 `--autoConnect` 连接当前正在使用的 Chrome
+- `autoConnect` 已验证可以列出现有页签、开测试页，但稳定性仍弱于 `9222` 独立浏览器模式。
+
+### 📊 今日关键结果
+
+| 指标 | 数据 |
+|------|------|
+| 第二轮 `unknown` 清理前 | 87 |
+| 第二轮 `unknown` 清理后 | **60** |
+| 本轮新回填 `Link_Format` | **29 行** |
+| 剩余 `profile` 型 `unknown` | 56 |
+| 剩余 `blog_comment` 型 `unknown` | 4 |
+
+**剩余 4 条仍值得继续深挖的 `blog_comment unknown`**：
+- `70` - https://blogs.ucl.ac.uk/brits/2014/06/01/sales-growth-curves/
+- `125` - https://joaniesimon.com/94f737822923f4567e1a7ce9681e5b9a-2/
+- `150` - https://cartoonresearch.com/index.php/forgotten-anime-57-kirara-2000
+- `181` - https://scandasia.com/binh-duong-province-of-vietnam-attracts-more-than-4000-foreign-direct-investment-projects/
+
+### 📋 当前待办（更新版）
+
+#### 高优先级
+- [ ] **把剩余 4 条 `blog_comment unknown` 做定点分析**：逐条看评论表单、评论列表与历史评论 DOM，尽量不要再扩一轮全局规则。
+- [ ] **在调度器加入硬跳过黑名单**：对 profile/member/company/wiki/forum-support 等站型在 `daily_scheduler.py` 阶段直接跳过，减少无效 `pending -> in_progress`。
+- [ ] **继续修 `Vision click_no_effect` 焦点问题**：当前 Vision 已能区分“识别不到坐标”和“点到了但没真正进入输入态”，下一步应在点击后验证焦点并补二次策略。
+
+#### 中优先级
+- [ ] **为 `Link_Format` 回填增加审计日志**：记录每次回填命中的证据类型和置信度，便于后续回看误判。
+- [ ] **把 `profile` 与真实文章页再做一次类型校正**：当前表内仍有不少 `Type=profile` 但 URL 实际像文章页的历史遗留项。
+- [ ] **飞书写入限流退避**：逐行写飞书时仍可能遇到限流，现阶段主要靠整表同步兜底。
+
+#### 低优先级
+- [ ] **把 `chrome-devtools-auto` 的使用说明写成操作手册**：明确它适合轻量调试，不适合长流程自动化。
+- [ ] **把 README 的工作日志整理成更短的阶段性里程碑**：避免日志越来越长、后续不易维护。
 
 ---
 

@@ -5,7 +5,7 @@ from gws_integration import GoogleSheetsManager
 from ai_generator import analyze_keywords, generate_anchor_text, generate_comment
 
 # 我们的目标推广网址
-MY_TARGET_WEBSITE = "https://slideology.com"
+MY_TARGET_WEBSITE = "https://bearclicker.net/"
 
 
 def auto_post_content(page, comment_content, url):

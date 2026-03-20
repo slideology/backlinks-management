@@ -19,15 +19,15 @@ class SheetLocalizationTests(unittest.TestCase):
     def test_localize_basic_value_translates_enums(self):
         self.assertEqual(localize_basic_value("Status", "failed"), "失败")
         self.assertEqual(localize_basic_value("Link_Strategy", "url_field"), "仅网址字段")
+        self.assertEqual(localize_basic_value("Link_Format", "plain_text_autolink"), "自动链接")
         self.assertEqual(localize_basic_value("Daily_Batch", "Batch-20260313"), "批次-20260313")
 
     @patch("sheet_localization.translate_fields_to_chinese")
     def test_translate_row_for_storage_preserves_links(self, mock_translate):
         mock_translate.return_value = {
-            "Keywords": "演示设计，视觉叙事",
             "Anchor_Text": 'HTML: 访问 <a href="https://slideology.com">专业幻灯片设计</a>',
-            "Comment_Content": "谢谢分享，内容很有帮助！",
             "Notes": "机器人自动提交成功",
+            "Comment_Content_ZH": "谢谢分享，内容很有帮助！",
         }
         row = {
             "ID": "1",
@@ -44,6 +44,7 @@ class SheetLocalizationTests(unittest.TestCase):
             "Keywords": "presentation design, visual storytelling",
             "Anchor_Text": 'HTML: visit <a href="https://slideology.com">presentation design</a>',
             "Comment_Content": "Thanks for sharing!",
+            "Comment_Content_ZH": "Thanks for sharing!",
             "Execution_Date": "2026-03-13",
             "Success_URL": "https://example.com/post",
             "Notes": "automation success",
@@ -58,18 +59,30 @@ class SheetLocalizationTests(unittest.TestCase):
         self.assertEqual(localized["URL"], "https://example.com/post")
         self.assertEqual(localized["Target_Website"], "https://slideology.com")
         self.assertEqual(localized["Daily_Batch"], "批次-20260313")
-        self.assertEqual(len(FEISHU_HEADERS_ZH), 19)
+        self.assertEqual(localized["Keywords"], "presentation design, visual storytelling")
+        self.assertEqual(localized["Comment_Content"], "Thanks for sharing!")
+        self.assertEqual(localized["Comment_Content_ZH"], "谢谢分享，内容很有帮助！")
+        self.assertEqual(len(FEISHU_HEADERS_ZH), 20)
 
     @patch("sheet_localization.translate_fields_to_chinese")
     def test_localize_updates_for_storage_translates_free_text(self, mock_translate):
-        mock_translate.return_value = {"Notes": "点击评论框后未能稳定输入"}
+        mock_translate.return_value = {
+            "Notes": "点击评论框后未能稳定输入",
+            "Comment_Content_ZH": "这里是中文翻译",
+        }
 
         localized = localize_updates_for_storage(
-            {"Status": "failed", "Notes": "click no effect", "Daily_Batch": "Batch-20260313"}
+            {
+                "Status": "failed",
+                "Notes": "click no effect",
+                "Comment_Content_ZH": "This is a translated comment",
+                "Daily_Batch": "Batch-20260313",
+            }
         )
 
         self.assertEqual(localized["Status"], "失败")
         self.assertEqual(localized["Notes"], "点击评论框后未能稳定输入")
+        self.assertEqual(localized["Comment_Content_ZH"], "This is a translated comment")
         self.assertEqual(localized["Daily_Batch"], "批次-20260313")
 
 

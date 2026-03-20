@@ -2,8 +2,11 @@ import time
 import json
 import re
 from datetime import datetime, timedelta
+from typing import Optional
 
 from playwright.sync_api import sync_playwright, Page, Frame
+
+from legacy_feishu_history import extract_cell_text, extract_cell_url, normalize_source_url
 
 # 错误信息中文化查找表
 ERROR_TRANSLATIONS = {
@@ -62,6 +65,24 @@ def format_notes(message: str, diagnosis: str = "") -> str:
     if diagnosis and diagnosis not in message:
         return f"{message} | 自动诊断: {diagnosis}"
     return message
+
+
+def resolve_runtime_link_format(url: str, current_link_format: str) -> tuple[str, dict]:
+    normalized = normalize_google_value("Link_Format", current_link_format or "")
+    if normalized and normalized != "unknown":
+        return normalized, {}
+
+    global _LINK_FORMAT_DETECTOR
+    if _LINK_FORMAT_DETECTOR is None:
+        from website_format_detector import WebsiteFormatDetector
+
+        _LINK_FORMAT_DETECTOR = WebsiteFormatDetector()
+
+    analysis = _LINK_FORMAT_DETECTOR.analyze_website(url)
+    recommended = normalize_google_value("Link_Format", analysis.get("recommended_format", "unknown"))
+    if recommended and recommended != "unknown":
+        return recommended, analysis
+    return normalized or "unknown", analysis
 
 def _fill_additional_fields(target, name: str, email: str, website: str):
     """
@@ -144,11 +165,15 @@ def _diagnose_site_status(page: Page) -> str:
     except:
         return "🌐 页面加载异常或网络极其不稳。"
 
-from gws_integration import GoogleSheetsManager
 from ai_generator import analyze_keywords, generate_anchor_text, generate_comment
-from sheet_localization import GOOGLE_HEADERS, localize_updates_for_storage, row_to_ordered_values, translate_row_for_storage
+from backlink_state import STATUS_HEADERS, STATUS_PENDING_RETRY, STATUS_SUCCESS
+from feishu_workbook import FeishuWorkbook
+from page_context import fetch_page_context
+from sheet_localization import normalize_google_value
+from sync_reporting_workbook import sync_reporting_workbook
 
-MY_TARGET_WEBSITE = "https://slideology.com"
+MY_TARGET_WEBSITE = "https://bearclicker.net/"
+_LINK_FORMAT_DETECTOR = None
 
 # =====================================================================
 # 预处理：尝试关掉所有 Cookie 同意弹窗（修复 GDPR 遮挡问题）
@@ -564,41 +589,66 @@ def _try_submit(page: Page, comment_content: str) -> tuple[bool, str]:
 # =====================================================================
 # 处理单条任务
 # =====================================================================
-def process_task(task_row, api_row_index, manager, page: Page, runtime_cfg: dict, feishu_client=None):
-    url = task_row[manager.col_map['URL']]
-    link_format = task_row[manager.col_map['Link_Format']]
-    batch_token = task_row[manager.col_map['Daily_Batch']] if len(task_row) > manager.col_map['Daily_Batch'] else ""
+def process_task(task_row: dict, target: dict, workbook: FeishuWorkbook, page: Page, runtime_cfg: dict):
+    raw_url = task_row.get("来源链接", "")
+    url = normalize_source_url(extract_cell_url(raw_url) or extract_cell_text(raw_url))
+    current_link_format = str(task_row.get("链接格式", "") or "")
+    link_format, link_format_analysis = resolve_runtime_link_format(url, current_link_format)
+    generation_link_format = link_format if link_format and link_format != "unknown" else "plain_text"
+    batch_token = str(task_row.get("目标站标识", "") or "")
+
+    if not url:
+        raise ValueError("任务来源链接为空，无法执行发帖。")
     
-    print(f"\n🚀 开始处理任务行 {api_row_index} -> {url}")
+    print(f"\n🚀 开始处理来源 {url} -> 站点 {target.get('site_key', '')}")
+    if link_format_analysis:
+        print(
+            "  🔎 Link_Format 预判："
+            f"{link_format_analysis.get('recommended_format', 'unknown')} | "
+            f"证据={link_format_analysis.get('evidence_type', 'unknown')} | "
+            f"置信度={link_format_analysis.get('confidence', 0)}"
+        )
     
     # 步骤 1：AI 生成文案
     print("  [1/3] 🤖 AI 正在生成外链推广文案...")
+    page_context = fetch_page_context(url)
+    print(
+        f"  🌍 页面语言={page_context.get('language_name', 'English')} | 标题={summarize_result_message(page_context.get('title', ''), 80)}"
+    )
     # ===== 优先读取 targets.json 中配置好的固定锚文本 =====
-    from ai_generator import load_active_target, get_anchor_for_format, generate_comment_for_target
+    from ai_generator import (
+        generate_localized_bundle_for_target,
+        get_anchor_for_format,
+    )
     
-    active_target = load_active_target()
+    active_target = target
     
     if active_target:
-        # ✅ 有配置文件：用固定锚文本，让 AI 生成相应格式评论
-        target_name = active_target.get("anchor_text", "Anonymous").title() # 首字母大写
+        target_name = active_target.get("anchor_text", "Anonymous").title()
         target_email = active_target.get("email", "slideology0816@gmail.com")
         target_url = active_target["url"]
         
-        print(f"  📋 使用 targets.json 配置：锚文本='{active_target['anchor_text']}' -> {target_url}")
-        anchor_text = get_anchor_for_format(active_target["anchor_text"], link_format, target_url)
-        comment_content = generate_comment_for_target(active_target, link_format)
+        print(f"  📋 使用飞书目标站配置：锚文本='{active_target.get('anchor_text', '')}' -> {target_url}")
+        content_bundle = generate_localized_bundle_for_target(active_target, generation_link_format, page_context)
+        keywords = content_bundle["keywords"]
+        anchor_text = content_bundle["anchor_text"]
+        comment_content = content_bundle["comment_content"]
+        comment_content_zh = content_bundle["comment_content_zh"]
     else:
         # ⚠️ 无配置文件：退回旧逻辑
         target_name = "Anonymous"
         target_email = "slideology0816@gmail.com"
         target_url = MY_TARGET_WEBSITE
         
-        print("  ⚠️ 未找到 targets.json，退回 AI 自动生成锚文本模式")
-        keywords = task_row[manager.col_map['Keywords']] if len(task_row) > manager.col_map['Keywords'] else ""
+        print("  ⚠️ 未找到飞书目标站配置，退回 AI 自动生成锚文本模式")
+        keywords = str(task_row.get("关键词", "") or "")
         if not keywords or keywords.strip() == "":
-            keywords = analyze_keywords(MY_TARGET_WEBSITE)
-        anchor_text     = generate_anchor_text(keywords, link_format, MY_TARGET_WEBSITE)
-        comment_content = generate_comment(anchor_text)
+            keywords = analyze_keywords(MY_TARGET_WEBSITE, page_context.get("excerpt", ""))
+        anchor_text = generate_anchor_text(keywords, generation_link_format, MY_TARGET_WEBSITE)
+        comment_content = generate_comment(anchor_text, page_context.get("title", ""))
+        from ai_generator import translate_comment_to_chinese
+
+        comment_content_zh = translate_comment_to_chinese(comment_content)
     
     # 步骤 2：自动发帖（带重试机制）
     print("  [2/3] 🌐 开始接管真实 Chrome 进行自动发帖...")
@@ -616,56 +666,57 @@ def process_task(task_row, api_row_index, manager, page: Page, runtime_cfg: dict
     )
     print(f"  🤖 发帖结果: {result_msg}")
     
-    # 步骤 3：结果写回 Google Sheets
-    print("  [3/3] 📝 更新结果至 Google Sheets...")
+    # 步骤 3：结果写回飞书状态表
+    print("  [3/3] 📝 更新结果至飞书状态表...")
     notes_message = format_notes(
         summarize_result_message(result_msg),
         run_meta.get("diagnosis", ""),
     )
+    last_updated_value = time.strftime('%Y-%m-%d %H:%M:%S')
+
     updates = {
-        'Target_Website': active_target["url"] if active_target else MY_TARGET_WEBSITE,
-        'Anchor_Text': anchor_text,
-        'Comment_Content': comment_content,
-        'Notes': notes_message,
+        "来源链接": url,
+        "来源标题": str(task_row.get("来源标题", "") or ""),
+        "根域名": str(task_row.get("根域名", "") or ""),
+        "页面评分": str(task_row.get("页面评分", "") or ""),
+        "目标站标识": str(target.get("site_key", "") or ""),
+        "目标网站": target_url,
+        "最后尝试时间": last_updated_value,
+        "当前评论内容": comment_content,
+        "当前评论内容中文": comment_content_zh,
+        "当前锚文本": anchor_text,
+        "关键词": keywords,
+        "链接格式": link_format,
+        "来源类型": str(task_row.get("来源类型", "") or ""),
+        "有网址字段": str(task_row.get("有网址字段", "") or ""),
+        "有验证码": str(task_row.get("有验证码", "") or ""),
+        "最后更新时间": last_updated_value,
     }
     
     if is_success:
-        updates['Status'] = 'completed'
-        updates['Success_URL'] = url
+        updates["状态"] = STATUS_SUCCESS
+        updates["最近成功时间"] = last_updated_value
+        updates["成功链接"] = url
+        updates["最近失败时间"] = ""
+        updates["最近失败原因"] = ""
+        updates["下次可发时间"] = ""
     else:
-        updates['Status'] = 'failed'
-        retry_date = (datetime.now() + timedelta(days=3)).strftime('%Y-%m-%d')
-        if 'retry_at' in manager.col_map:
-            updates['retry_at'] = retry_date
+        updates["状态"] = STATUS_PENDING_RETRY
+        updates["最近失败时间"] = last_updated_value
+        updates["最近失败原因"] = notes_message
 
-    localized_updates = localize_updates_for_storage(updates)
-    manager.update_task(api_row_index, localized_updates)
+    workbook.upsert_sheet_dict("records", STATUS_HEADERS, ["来源链接", "目标站标识"], updates)
     result = {
         "success": is_success,
         "url": url,
-        "format": link_format,
-        "reason": localized_updates.get("Notes", notes_message),
+        "format": generation_link_format,
+        "reason": notes_message,
         "target_website": target_url,
         "batch_token": batch_token,
-        "google_sheets_row": api_row_index + 1,
+        "site_key": str(target.get("site_key", "") or ""),
         "used_vision": run_meta.get("used_vision", False),
         "diagnostic_category": run_meta.get("diagnostic_category", ""),
     }
-    if feishu_client:
-        try:
-            row_dict = {}
-            for idx, header in enumerate(GOOGLE_HEADERS):
-                row_dict[header] = task_row[idx] if idx < len(task_row) else ""
-            row_dict.update(updates)
-            localized_row = translate_row_for_storage(row_dict)
-            feishu_row = feishu_client.upsert_backlink_row(
-                api_row_index + 1,
-                row_to_ordered_values(localized_row),
-            )
-            result["feishu_row"] = feishu_row
-        except Exception as exc:
-            print(f"  ⚠️ 写入飞书表格失败: {exc}")
-            result["feishu_error"] = summarize_result_message(str(exc), limit=120)
     return result
 
 
@@ -673,102 +724,74 @@ def process_task(task_row, api_row_index, manager, page: Page, runtime_cfg: dict
 # =====================================================================
 # 主程序入口
 # =====================================================================
-def main():
+def run_once(selected_tasks: Optional[list[dict]] = None, send_report: bool = True) -> dict:
     runtime_cfg = load_runtime_config()
-    success_goal = runtime_cfg["execution"]["success_goal"]
-    
-    manager = GoogleSheetsManager()
-    all_data = manager.read_all_tasks()
-    
-    if len(all_data) <= 1:
-        print("表格无数据！")
-        return
-    
-    status_idx = manager.col_map['Status']
-    today_tasks = []
-    
-    # 统计当前已完成的历史成功数
-    historical_success = sum(
-        1 for row in all_data[1:]
-        if len(row) > status_idx and row[status_idx] == 'completed'
-    )
-    
-    # 如果已经达到目标，直接退出
-    if historical_success >= success_goal:
-        print(f"🎉 已累计成功 {historical_success} 个，已达到目标 {success_goal}，无需继续！")
-        return
-    
-    remaining_needed = success_goal - historical_success
-    
-    for i, row in enumerate(all_data[1:]):
-        status = row[status_idx] if len(row) > status_idx else ''
-        if status == 'in_progress':
-            today_tasks.append({
-                'row_index': i + 1,
-                'data': row
-            })
-    
+    workbook = FeishuWorkbook.from_config()
+    if not workbook:
+        raise RuntimeError("飞书未正确配置，无法执行发帖。")
+
+    tasks = selected_tasks or []
+
     print("=" * 50)
-    print("🤖 外链自动化 - 增强版全自动发布模块")
+    print("🤖 外链自动化 - 飞书多站点执行模块")
     print("=" * 50)
-    print(f"📊 历史成功: {historical_success} 个 | 目标: {success_goal} 个 | 还需成功: {remaining_needed} 个")
-    
-    if not today_tasks:
+
+    if not tasks:
         print("🎉 今日无发布任务，请先运行 daily_scheduler.py 挑选任务。")
-        return
-    
-    print(f"📦 找到 {len(today_tasks)} 个 in_progress 任务，开始处理...")
-    
+        return {"success": [], "failed": [], "today_tasks": 0}
+
+    print(f"📦 找到 {len(tasks)} 个进行中任务，开始处理...")
+
+    success_list = []
+    failed_list = []
+
     print("🕸️ 正在连接你的本地 Chrome 浏览器（9222 端口）...")
     with sync_playwright() as p:
         try:
-            browser_app = p.chromium.connect_over_cdp("http://localhost:9222")
+            browser_app = p.chromium.connect_over_cdp("http://127.0.0.1:9222")
             print("🤩 成功接管本地真实 Chrome！指纹认证已生效。\n")
-            from feishu_integration import create_feishu_client
-
-            feishu_client = create_feishu_client()
             context = browser_app.contexts[0]
             work_page = context.new_page()
-            
-            success_list = []
-            failed_list = []
-            current_success = historical_success  # 当前批次的滚动计数
-            
-            for idx, task in enumerate(today_tasks, start=1):
-                # 已达目标，立刻停止
-                if current_success >= success_goal:
-                    print(f"\n🎊 已累计成功 {current_success} 个，达到目标 {success_goal}！自动停止。")
-                    break
-                
+
+            for idx, task in enumerate(tasks, start=1):
                 if work_page.is_closed():
                     work_page = context.new_page()
-                print(f"\n>>> 进度: {idx}/{len(today_tasks)} | 当前成功: {current_success}/{success_goal}")
-                res = process_task(task['data'], task['row_index'], manager, work_page, runtime_cfg, feishu_client)
+                print(f"\n>>> 进度: {idx}/{len(tasks)}")
+                res = process_task(task["status_row"], task["target"], workbook, work_page, runtime_cfg)
                 if res["success"]:
                     success_list.append(res)
-                    current_success += 1
-                    print(f"  📈 累计成功进度: {current_success}/{success_goal}")
-                    if current_success >= success_goal:
-                        print(f"\n🎊 恭喜！已累计成功 {current_success} 个，达到目标！本批次任务提前完成。")
                 else:
                     failed_list.append(res)
-            
+
             if not work_page.is_closed():
                 work_page.close()
             browser_app.close()
-            
-            # 发送飞书通知
-            from webhook_sender import create_webhook_sender
-            sender = create_webhook_sender()
-            if sender:
-                summary = {"success": success_list, "failed": failed_list}
-                title = f"🌍 外链自动化执行报告 | 累计成功 {current_success}/{success_goal}"
-                sender.send_detailed_report(title, summary)
-            else:
-                print("\nℹ️ 未配置飞书 Webhook，跳过通知。")
-        
+
+            if send_report:
+                from webhook_sender import create_webhook_sender
+                sender = create_webhook_sender()
+                if sender:
+                    summary = {"success": success_list, "failed": failed_list}
+                    title = f"🌍 外链自动化执行报告 | 成功 {len(success_list)} | 失败 {len(failed_list)}"
+                    sender.send_detailed_report(title, summary)
+                else:
+                    print("\nℹ️ 未配置飞书 Webhook，跳过通知。")
+
         except Exception as e:
             print(f"❌ 接管本地浏览器失败（请确认是通过 Start_Robot.command 启动的）: {e}")
+            failed_list.append({"url": "", "reason": str(e), "success": False})
+
+    sync_reporting_workbook(workbook=workbook)
+
+    return {
+        "success": success_list,
+        "failed": failed_list,
+        "today_tasks": len(tasks),
+    }
+
+
+def main():
+    run_once(send_report=True)
 
 if __name__ == '__main__':
     main()

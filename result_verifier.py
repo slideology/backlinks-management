@@ -11,7 +11,7 @@ import requests
 from datetime import datetime
 from gws_integration import GoogleSheetsManager
 
-MY_DOMAIN = "slideology.com"
+MY_DOMAIN = "bearclicker.net"
 
 def verify_url_contains_link(success_url: str, target_domain: str = MY_DOMAIN) -> bool:
     """

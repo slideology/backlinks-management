@@ -20,6 +20,7 @@ GOOGLE_HEADERS = [
     "Keywords",
     "Anchor_Text",
     "Comment_Content",
+    "Comment_Content_ZH",
     "Execution_Date",
     "Success_URL",
     "Notes",
@@ -42,6 +43,7 @@ HEADER_LABELS_ZH = {
     "Keywords": "关键词",
     "Anchor_Text": "锚文本",
     "Comment_Content": "评论内容",
+    "Comment_Content_ZH": "评论内容中文",
     "Execution_Date": "执行日期",
     "Success_URL": "成功发布链接",
     "Notes": "备注",
@@ -52,7 +54,8 @@ HEADER_LABELS_ZH = {
 FEISHU_HEADERS_ZH = [HEADER_LABELS_ZH[header] for header in GOOGLE_HEADERS]
 
 TRANSLATION_CACHE_PATH = Path(".translation_cache.json")
-FREE_TEXT_COLUMNS = {"Keywords", "Anchor_Text", "Comment_Content", "Notes"}
+LOCALIZED_TEXT_COLUMNS = {"Notes", "Comment_Content_ZH"}
+MULTILINGUAL_CONTENT_COLUMNS = {"Keywords", "Anchor_Text", "Comment_Content"}
 URL_COLUMNS = {"URL", "Target_Website", "Success_URL"}
 PASSTHROUGH_COLUMNS = {"ID", "Execution_Date", "Last_Updated"}
 
@@ -86,6 +89,7 @@ ENUM_TRANSLATIONS = {
         "url_field": "网址字段",
         "unknown": "未知",
         "plain_text": "纯文本",
+        "plain_text_autolink": "自动链接",
     },
     "Status": {
         "pending": "待处理",
@@ -140,7 +144,7 @@ def needs_free_text_translation(column: str, value: str) -> bool:
         return False
     if column == "Notes":
         return looks_translatable(text)
-    return looks_translatable(text)
+    return False
 
 
 def normalize_batch_token(value: str) -> str:
@@ -316,7 +320,7 @@ def translate_row_for_storage(row_dict: dict[str, str]) -> dict[str, str]:
 
     for column in GOOGLE_HEADERS:
         value = str(row_dict.get(column, "") or "")
-        if column in FREE_TEXT_COLUMNS and needs_free_text_translation(column, value):
+        if column in LOCALIZED_TEXT_COLUMNS and needs_free_text_translation(column, value):
             pending_ai_fields[column] = value
             continue
         localized[column] = localize_basic_value(column, value)
@@ -327,7 +331,7 @@ def translate_row_for_storage(row_dict: dict[str, str]) -> dict[str, str]:
     if "Notes" in localized:
         localized["Notes"] = localize_note_phrases(localized["Notes"])
 
-    for column in FREE_TEXT_COLUMNS:
+    for column in LOCALIZED_TEXT_COLUMNS:
         localized.setdefault(column, str(row_dict.get(column, "") or ""))
 
     return localized
@@ -337,7 +341,7 @@ def localize_updates_for_storage(updates: dict[str, str]) -> dict[str, str]:
     localized = {}
     for column, value in updates.items():
         text = str(value or "")
-        if column in FREE_TEXT_COLUMNS and needs_free_text_translation(column, text):
+        if column in LOCALIZED_TEXT_COLUMNS and needs_free_text_translation(column, text):
             localized[column] = translate_fields_to_chinese({column: text})[column]
             continue
         localized[column] = localize_basic_value(column, text)

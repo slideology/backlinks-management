@@ -12,7 +12,7 @@
 4. **Discovered_From** (D列) - 发现来源
 5. **Has_Captcha** (E列) - 是否有验证码：Yes/No
 6. **Link_Strategy** (F列) - 链接策略：url_field, in_content, both
-7. **Link_Format** (G列) - 链接格式：html, bbcode, markdown, unknown
+7. **Link_Format** (G列) - 链接格式：html, bbcode, markdown, plain_text, plain_text_autolink, unknown
 8. **Has_URL_Field** (H列) - 是否有URL字段：Yes/No
 
 ### 管理和跟踪字段（新增）
@@ -27,12 +27,13 @@
 11. **Target_Website** (K列) - 我们要推广的目标网站
 12. **Keywords** (L列) - 相关关键词，逗号分隔
 13. **Anchor_Text** (M列) - 锚文本
-14. **Comment_Content** (N列) - 评论内容
-15. **Execution_Date** (O列) - 执行日期
-16. **Success_URL** (P列) - 成功发布后的链接
-17. **Notes** (Q列) - 备注信息
-18. **Last_Updated** (R列) - 最后更新时间
-19. **Daily_Batch** (S列) - 所属批次（用于控制每日发布数量）
+14. **Comment_Content** (N列) - 评论内容（保留目标网页语言）
+15. **Comment_Content_ZH** (O列) - 评论内容中文翻译（便于人工核查）
+16. **Execution_Date** (P列) - 执行日期
+17. **Success_URL** (Q列) - 成功发布后的链接
+18. **Notes** (R列) - 备注信息
+19. **Last_Updated** (S列) - 最后更新时间
+20. **Daily_Batch** (T列) - 所属批次（用于控制每日发布数量）
 
 ## 数据验证规则
 
@@ -58,7 +59,7 @@ url_field, in_content, both
 
 ### Link_Format 字段下拉选项
 ```
-html, bbcode, markdown, plain_text, unknown
+html, bbcode, markdown, plain_text, plain_text_autolink, unknown
 ```
 
 ## 条件格式设置

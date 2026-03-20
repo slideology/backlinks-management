@@ -12,6 +12,7 @@ from sheet_localization import FEISHU_HEADERS_ZH, GOOGLE_HEADERS
 
 
 logger = logging.getLogger(__name__)
+OVERWRITE_CHUNK_SIZE = 2000
 
 DEFAULT_HEADERS = [
     "Execution Time",
@@ -28,6 +29,15 @@ DEFAULT_HEADERS = [
 
 BACKLINK_COLUMNS = GOOGLE_HEADERS
 BACKLINK_HEADERS_ZH = FEISHU_HEADERS_ZH
+
+
+def _column_letter(index: int) -> str:
+    result = ""
+    current = index
+    while current > 0:
+        current, remainder = divmod(current - 1, 26)
+        result = chr(65 + remainder) + result
+    return result
 
 
 def load_feishu_config(config_path: str = "config.json") -> dict:
@@ -283,8 +293,15 @@ class FeishuClient:
         return data.get("data", {}).get("spreadsheet", {})
 
     def get_sheet_id_by_token(self, spreadsheet_token: str, as_user: Optional[bool] = None) -> str:
+        sheets = self.get_sheet_metainfo(spreadsheet_token, as_user=as_user)
+        if not sheets:
+            raise RuntimeError("飞书表格中未找到任何 sheet。")
+        return sheets[0]["sheetId"]
+
+    def get_sheet_metainfo(self, spreadsheet_token: Optional[str] = None, as_user: Optional[bool] = None) -> list[dict]:
+        actual_token = spreadsheet_token or self.spreadsheet_token
         response = requests.get(
-            f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/metainfo",
+            f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{actual_token}/metainfo",
             headers=self.build_headers(as_user=as_user),
             timeout=self.timeout,
         )
@@ -292,14 +309,109 @@ class FeishuClient:
         data = response.json()
         if data.get("code") != 0:
             raise RuntimeError(f"读取飞书表格元信息失败: {data}")
-        sheets = data.get("data", {}).get("sheets", [])
-        if not sheets:
-            raise RuntimeError("飞书表格中未找到任何 sheet。")
-        return sheets[0]["sheetId"]
+        return data.get("data", {}).get("sheets", [])
+
+    def get_sheet_id_by_title(
+        self,
+        title: str,
+        spreadsheet_token: Optional[str] = None,
+        as_user: Optional[bool] = None,
+    ) -> Optional[str]:
+        for sheet in self.get_sheet_metainfo(spreadsheet_token=spreadsheet_token, as_user=as_user):
+            if sheet.get("title") == title:
+                return sheet.get("sheetId")
+        return None
+
+    def batch_update_sheets(
+        self,
+        requests_payload: list[dict],
+        spreadsheet_token: Optional[str] = None,
+        as_user: Optional[bool] = None,
+    ) -> dict:
+        actual_token = spreadsheet_token or self.spreadsheet_token
+        response = requests.post(
+            f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{actual_token}/sheets_batch_update",
+            headers=self.build_headers(as_user=as_user),
+            json={"requests": requests_payload},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"飞书 sheet 批量更新失败: {data}")
+        return data.get("data", {})
+
+    def ensure_sheet(
+        self,
+        title: str,
+        spreadsheet_token: Optional[str] = None,
+        as_user: Optional[bool] = None,
+    ) -> str:
+        actual_token = spreadsheet_token or self.spreadsheet_token
+        existing_sheet_id = self.get_sheet_id_by_title(title, spreadsheet_token=actual_token, as_user=as_user)
+        if existing_sheet_id:
+            return existing_sheet_id
+
+        self.batch_update_sheets(
+            [{"addSheet": {"properties": {"title": title}}}],
+            spreadsheet_token=actual_token,
+            as_user=as_user,
+        )
+        created_sheet_id = self.get_sheet_id_by_title(title, spreadsheet_token=actual_token, as_user=as_user)
+        if not created_sheet_id:
+            raise RuntimeError(f"飞书 sheet 创建成功后仍未找到标题为 {title} 的工作表。")
+        return created_sheet_id
+
+    def rename_sheet(
+        self,
+        sheet_id: str,
+        title: str,
+        spreadsheet_token: Optional[str] = None,
+        as_user: Optional[bool] = None,
+    ) -> None:
+        actual_token = spreadsheet_token or self.spreadsheet_token
+        self.batch_update_sheets(
+            [{"updateSheet": {"properties": {"sheetId": sheet_id, "title": title}}}],
+            spreadsheet_token=actual_token,
+            as_user=as_user,
+        )
 
     def attach_spreadsheet(self, spreadsheet_token: str, sheet_id: str) -> None:
         self.spreadsheet_token = spreadsheet_token
         self.sheet_id = sheet_id
+
+    def overwrite_sheet_rows(self, sheet_id: str, headers: list[str], rows: list[list[str]]) -> int:
+        self.attach_spreadsheet(self.spreadsheet_token, sheet_id)
+        last_col = _column_letter(len(headers))
+        all_rows = [headers] + rows
+        total_rows = len(all_rows)
+        existing_rows = self.read_range(f"{sheet_id}!A1:{last_col}50000")
+        existing_nonempty_rows = 0
+        for index, row in enumerate(existing_rows, start=1):
+            if any(str(cell or "").strip() for cell in row):
+                existing_nonempty_rows = index
+
+        start = 0
+        while start < total_rows:
+            chunk = all_rows[start : start + OVERWRITE_CHUNK_SIZE]
+            start_row = start + 1
+            end_row = start + len(chunk)
+            self.write_range(f"{sheet_id}!A{start_row}:{last_col}{end_row}", chunk)
+            start += OVERWRITE_CHUNK_SIZE
+
+        if existing_nonempty_rows > total_rows:
+            blank_row = [""] * len(headers)
+            clear_start = total_rows
+            while clear_start < existing_nonempty_rows:
+                clear_chunk_size = min(OVERWRITE_CHUNK_SIZE, existing_nonempty_rows - clear_start)
+                start_row = clear_start + 1
+                end_row = clear_start + clear_chunk_size
+                self.write_range(
+                    f"{sheet_id}!A{start_row}:{last_col}{end_row}",
+                    [blank_row[:] for _ in range(clear_chunk_size)],
+                )
+                clear_start += clear_chunk_size
+        return total_rows
 
     def ensure_headers(self) -> list[str]:
         values = self.read_range(f"{self.sheet_id}!A1:J2")
@@ -314,14 +426,15 @@ class FeishuClient:
         return headers
 
     def ensure_backlink_headers(self) -> list[str]:
-        values = self.read_range(f"{self.sheet_id}!A1:S2")
+        last_col = _column_letter(len(BACKLINK_HEADERS_ZH))
+        values = self.read_range(f"{self.sheet_id}!A1:{last_col}2")
         if not values or not values[0] or not any(cell is not None and str(cell).strip() for cell in values[0]):
-            self.write_range(f"{self.sheet_id}!A1:S1", [BACKLINK_HEADERS_ZH])
+            self.write_range(f"{self.sheet_id}!A1:{last_col}1", [BACKLINK_HEADERS_ZH])
             return BACKLINK_HEADERS_ZH
 
         headers = [str(cell or "") for cell in values[0]]
         if headers[: len(BACKLINK_HEADERS_ZH)] != BACKLINK_HEADERS_ZH:
-            self.write_range(f"{self.sheet_id}!A1:S1", [BACKLINK_HEADERS_ZH])
+            self.write_range(f"{self.sheet_id}!A1:{last_col}1", [BACKLINK_HEADERS_ZH])
             return BACKLINK_HEADERS_ZH
         return headers
 
@@ -329,13 +442,15 @@ class FeishuClient:
         self.ensure_backlink_headers()
         values = [BACKLINK_HEADERS_ZH] + rows
         end_row = len(values)
-        self.write_range(f"{self.sheet_id}!A1:S{end_row}", values)
+        last_col = _column_letter(len(BACKLINK_HEADERS_ZH))
+        self.write_range(f"{self.sheet_id}!A1:{last_col}{end_row}", values)
         return end_row
 
     def upsert_backlink_row(self, google_sheet_row: int, row_values: list[str]) -> int:
         self.ensure_backlink_headers()
         target_row_index = max(2, int(google_sheet_row))
-        self.write_range(f"{self.sheet_id}!A{target_row_index}:S{target_row_index}", [row_values])
+        last_col = _column_letter(len(BACKLINK_HEADERS_ZH))
+        self.write_range(f"{self.sheet_id}!A{target_row_index}:{last_col}{target_row_index}", [row_values])
         return target_row_index
 
     def upsert_execution_record(self, record: dict) -> int:

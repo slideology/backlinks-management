@@ -20,6 +20,7 @@ echo "=================================================="
 #   - 两个 Chrome 实例互不干扰、和平共处！
 
 BOT_CHROME_DATA="$HOME/ChromeAutoBot"
+AUTO_MODE="${AUTO_MODE:-0}"
 
 # 首次运行时自动创建机器人专属目录
 mkdir -p "$BOT_CHROME_DATA"
@@ -29,21 +30,25 @@ if curl -s http://localhost:9222/json/version > /dev/null 2>&1; then
     echo "-> 机器人 Chrome 已在运行，无需重启。"
 else
     echo "-> 正在启动机器人专属 Chrome（不影响你的日常 Chrome）..."
-    /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
+    open -na "Google Chrome" --args \
         --remote-debugging-port=9222 \
         --user-data-dir="$BOT_CHROME_DATA" \
         --no-first-run \
-        --no-default-browser-check &
+        --no-default-browser-check
     
     echo "-> 等待机器人 Chrome 就绪..."
     sleep 4
     
-    echo ""
-    echo "⚠️  【首次使用提示】"
-    echo "   如果这是第一次运行，请在刚刚弹出的 Chrome 窗口里"
-    echo "   登录你的专用发帖 Google 账号。"
-    echo "   登录完成后，按任意键继续..."
-    read -n 1 -s -r
+    if [[ "$AUTO_MODE" != "1" && -t 0 ]]; then
+        echo ""
+        echo "⚠️  【首次使用提示】"
+        echo "   如果这是第一次运行，请在刚刚弹出的 Chrome 窗口里"
+        echo "   登录你的专用发帖 Google 账号。"
+        echo "   登录完成后，按任意键继续..."
+        read -n 1 -s -r
+    else
+        echo "-> 自动模式：跳过首次登录确认提示。"
+    fi
 fi
 
 echo "-> Chrome 已在后台启动 (正在监听 9222 端口)，等待 3 秒钟加载..."
@@ -52,17 +57,9 @@ sleep 3
 
 echo ""
 echo "=================================================="
-echo "🎯 环节2: 正在运行 daily_scheduler.py 挑选今日优质猎物..."
+echo "🎯 环节2: 正在运行 daily_run_orchestrator.py 自动补批次直到成功目标..."
 echo "=================================================="
-python3 daily_scheduler.py
-
-
-echo ""
-echo "=================================================="
-echo "🚀 环节3: 正在运行 form_automation_local.py 让 AI 自动接管并疯狂发帖..."
-echo "=================================================="
-# 注意：我们这里调用的是即将给你准备的新版发帖脚本 (专门接管 9222 的真实浏览器)
-python3 form_automation_local.py
+python3 -u daily_run_orchestrator.py
 
 
 echo ""

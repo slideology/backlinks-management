@@ -10,7 +10,7 @@ from sheet_localization import GOOGLE_HEADERS, localize_basic_value, normalize_g
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'sheets_config.txt')
 TOKEN_FILE = os.path.join(os.path.dirname(__file__), 'token.json')
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-SHEET_RANGE = 'backlinks!A1:S' # 读取整张表 (A列到S列)
+SHEET_RANGE = 'backlinks!A1:T' # 读取整张表 (A列到T列)
 
 def get_spreadsheet_id():
     """从本地配置文件读取 Spreadsheet ID"""
@@ -39,6 +39,7 @@ class GoogleSheetsManager:
         self.spreadsheet_id = get_spreadsheet_id()
         self.sheet_id = self.get_sheet_id()
         self.headers = GOOGLE_HEADERS
+        self.ensure_schema()
         # 定义列索引映射，方便程序通过名字而不是通过数字来访问数据
         self.col_map = {name: index for index, name in enumerate(self.headers)}
 
@@ -46,6 +47,40 @@ class GoogleSheetsManager:
         """获取第一个 sheet 的真实 ID (而不是硬编码为 0)"""
         spreadsheet = self.service.spreadsheets().get(spreadsheetId=self.spreadsheet_id).execute()
         return spreadsheet['sheets'][0]['properties']['sheetId']
+
+    def ensure_schema(self):
+        """确保主表表头与代码中的列定义一致，必要时自动补列迁移。"""
+        result = self.service.spreadsheets().values().get(
+            spreadsheetId=self.spreadsheet_id,
+            range="backlinks!A1:Z",
+        ).execute()
+        rows = result.get("values", [])
+        if not rows:
+            self.service.spreadsheets().values().update(
+                spreadsheetId=self.spreadsheet_id,
+                range=SHEET_RANGE,
+                valueInputOption="RAW",
+                body={"values": [self.headers]},
+            ).execute()
+            return
+
+        current_headers = rows[0]
+        if current_headers == self.headers:
+            return
+
+        header_map = {name: idx for idx, name in enumerate(current_headers)}
+        migrated_rows = [self.headers]
+        for row in rows[1:]:
+            migrated_rows.append(
+                [row[header_map[name]] if name in header_map and len(row) > header_map[name] else "" for name in self.headers]
+            )
+
+        self.service.spreadsheets().values().update(
+            spreadsheetId=self.spreadsheet_id,
+            range=f"backlinks!A1:T{len(migrated_rows)}",
+            valueInputOption="RAW",
+            body={"values": migrated_rows},
+        ).execute()
 
     def read_all_tasks_raw(self):
         """读取整张表的所有数据（包括标题行）"""

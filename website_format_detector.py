@@ -1,376 +1,458 @@
 #!/usr/bin/env python3
 """
-网站格式检测器
-用于分析外链目标网站的技术特征和内容格式支持
+评论输入格式检测器
+用于在发帖前基于评论编辑器提示和历史评论 DOM 预判 Link_Format。
 """
 
-import requests
 import re
-from urllib.parse import urljoin, urlparse
-from bs4 import BeautifulSoup
-from typing import Dict, List, Optional, Tuple
-import time
-import random
+from typing import Dict, Iterable, Optional
+
+import requests
+from bs4 import BeautifulSoup, Tag
+
+
+COMMENT_REGION_SELECTORS = (
+    "#comments",
+    ".comments",
+    ".comments-area",
+    ".commentlist",
+    ".comment-list",
+    ".responses",
+    ".discussion",
+    "#respond",
+    ".comment-respond",
+)
+
+COMMENT_BLOCK_SELECTORS = (
+    ".comment-content",
+    ".comment-body",
+    ".comment-text",
+    ".comments__content",
+    ".entry-comment",
+    ".comment-entry",
+    ".comment-container",
+    ".commentContainer",
+    ".commentList",
+    ".media",
+    "article.comment",
+    "li.comment",
+    "div.comment",
+    "p.comment",
+    '[class*="comments__item"]',
+    '[id^="commentbody-"]',
+)
+
+COMMENT_FORM_HINTS = ("comment", "reply", "message", "textarea", "discussion")
+NOISE_HINTS = ("sidebar", "widget", "recent", "related", "menu", "nav", "header", "footer")
+GENERIC_LINK_TEXTS = {"reply", "edit", "permalink", "share", "report", "like"}
+
+MARKDOWN_PATTERNS = (
+    r"\bmarkdown\b",
+    r"\[.+?\]\(.+?\)",
+    r"supports markdown",
+    r"markdown formatting",
+    r"md-editor",
+)
+
+BBCODE_PATTERNS = (
+    r"\bbbcode\b",
+    r"\[url=.*?\].*?\[/url\]",
+    r"\[b\].*?\[/b\]",
+    r"\[i\].*?\[/i\]",
+    r"bbcode is on",
+)
+
+HTML_PATTERNS = (
+    r"html tags allowed",
+    r"html is allowed",
+    r"allowed html",
+    r"allowed tags",
+    r"use html",
+)
+
+RICH_EDITOR_HINTS = (
+    "tinymce",
+    "ckeditor",
+    "froala",
+    "summernote",
+    "quill",
+    "wysiwyg",
+    "rich-editor",
+    "html-editor",
+)
+
+WEBSITE_FIELD_HINTS = (
+    'name="url"',
+    "name='url'",
+    'id="url"',
+    "id='url'",
+    'name="website"',
+    "name='website'",
+    'id="website"',
+    "id='website'",
+    "comment-form-url",
+    "website",
+    "web site",
+)
+
+HARD_SKIP_URL_PATTERNS = (
+    "/profile",
+    "/users/",
+    "/user/",
+    "/profiles/",
+    "member.php",
+    "memberlist.php",
+    "action=profile",
+    "searchuser",
+    "/company/",
+    "/employer/",
+    "/groups/",
+    "show_bug.cgi",
+    "/support/discussions/",
+    "/discussions/threads/",
+    "/qa/user",
+    "mastodon.social/@",
+    "wiki/user:",
+    "/sounds/",
+)
+
+
+def _normalize_url_text(value: str) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"^https?://", "", text)
+    text = re.sub(r"^www\.", "", text)
+    return text.rstrip("/").strip()
+
+
+def _looks_like_bare_url(text: str) -> bool:
+    candidate = str(text or "").strip()
+    return bool(
+        re.fullmatch(r"https?://\S+", candidate)
+        or re.fullmatch(r"www\.\S+", candidate)
+        or re.fullmatch(r"[A-Za-z0-9.-]+\.[A-Za-z]{2,}(/\S*)?", candidate)
+    )
+
+
+def _is_noise_node(node: Optional[Tag]) -> bool:
+    current = node
+    while current and isinstance(current, Tag):
+        if current.name in {"aside", "nav", "header", "footer"}:
+            return True
+        attrs = " ".join(
+            str(part)
+            for part in ([current.get("id", "")] + current.get("class", []))
+            if part
+        ).lower()
+        if any(hint in attrs for hint in NOISE_HINTS):
+            return True
+        current = current.parent
+    return False
+
+
+def _dedupe_nodes(nodes: Iterable[Tag]) -> list[Tag]:
+    seen = set()
+    deduped = []
+    for node in nodes:
+        marker = id(node)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        deduped.append(node)
+    return deduped
+
+
+def _should_skip_url(url: str) -> bool:
+    normalized = str(url or "").strip().lower()
+    return any(pattern in normalized for pattern in HARD_SKIP_URL_PATTERNS)
+
 
 class WebsiteFormatDetector:
-    """网站格式和特征检测器"""
+    """基于评论区证据预判 Link_Format。"""
 
     def __init__(self):
         self.session = requests.Session()
-        # 模拟真实浏览器的 User-Agent
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        })
-
-        # 常见的富文本编辑器特征
-        self.rich_editors = {
-            'tinymce': ['tinymce', 'mce-'],
-            'ckeditor': ['ckeditor', 'cke_'],
-            'froala': ['froala'],
-            'summernote': ['note-editor', 'summernote'],
-            'quill': ['ql-editor', 'quill']
-        }
-
-        # 常见的评论系统
-        self.comment_systems = {
-            'disqus': ['disqus'],
-            'facebook': ['fb-comments'],
-            'wordpress': ['wp-comment', 'comment-form'],
-            'custom': ['comment', 'reply']
-        }
+        self.session.headers.update(
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36"
+                )
+            }
+        )
 
     def analyze_website(self, url: str) -> Dict:
-        """分析网站的完整信息"""
-        try:
-            print(f"正在分析: {url}")
-
-            # 获取网页内容
-            response = self.session.get(url, timeout=10)
-            response.raise_for_status()
-
-            soup = BeautifulSoup(response.content, 'html.parser')
-
-            analysis = {
-                'url': url,
-                'status_code': response.status_code,
-                'title': self._get_title(soup),
-                'supported_formats': self._detect_supported_formats(soup, response.text),
-                'comment_system': self._detect_comment_system(soup),
-                'rich_editor': self._detect_rich_editor(soup, response.text),
-                'forms': self._analyze_forms(soup),
-                'captcha_detected': self._detect_captcha(soup, response.text),
-                'registration_required': self._check_registration_required(soup),
-                'social_login': self._detect_social_login(soup),
-                'content_guidelines': self._extract_content_guidelines(soup),
-                'platform_type': self._identify_platform_type(soup, response.text),
-                'meta_info': self._extract_meta_info(soup)
-            }
-
-            return analysis
-
-        except Exception as e:
+        """分析网站评论能力，返回推荐格式与证据。"""
+        if _should_skip_url(url):
             return {
-                'url': url,
-                'error': str(e),
-                'status': 'failed'
+                "url": url,
+                "recommended_format": "unknown",
+                "evidence_type": "skip_non_article_page",
+                "confidence": 0.0,
+                "supported_formats": ["unknown"],
+            }
+        try:
+            print(f"正在分析评论格式: {url}")
+            response = self.session.get(url, timeout=12)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
+
+            editor_result = self._detect_editor_format(soup)
+            if editor_result:
+                return {
+                    "url": url,
+                    "status_code": response.status_code,
+                    "title": self._get_title(soup),
+                    "recommended_format": editor_result["recommended_format"],
+                    "evidence_type": editor_result["evidence_type"],
+                    "confidence": editor_result["confidence"],
+                    "supported_formats": [editor_result["recommended_format"]],
+                }
+
+            history_result = self._detect_historical_comment_format(soup)
+            if history_result:
+                return {
+                    "url": url,
+                    "status_code": response.status_code,
+                    "title": self._get_title(soup),
+                    "recommended_format": history_result["recommended_format"],
+                    "evidence_type": history_result["evidence_type"],
+                    "confidence": history_result["confidence"],
+                    "supported_formats": [history_result["recommended_format"]],
+                }
+
+            fallback_result = self._detect_form_capability_fallback(soup)
+            if fallback_result:
+                return {
+                    "url": url,
+                    "status_code": response.status_code,
+                    "title": self._get_title(soup),
+                    "recommended_format": fallback_result["recommended_format"],
+                    "evidence_type": fallback_result["evidence_type"],
+                    "confidence": fallback_result["confidence"],
+                    "supported_formats": [fallback_result["recommended_format"]],
+                }
+
+            return {
+                "url": url,
+                "status_code": response.status_code,
+                "title": self._get_title(soup),
+                "recommended_format": "unknown",
+                "evidence_type": "unknown",
+                "confidence": 0.0,
+                "supported_formats": ["unknown"],
+            }
+        except Exception as exc:
+            return {
+                "url": url,
+                "status": "failed",
+                "error": str(exc),
+                "recommended_format": "unknown",
+                "evidence_type": "unknown",
+                "confidence": 0.0,
+                "supported_formats": ["unknown"],
             }
 
     def _get_title(self, soup: BeautifulSoup) -> str:
-        """获取页面标题"""
-        title_tag = soup.find('title')
-        return title_tag.get_text().strip() if title_tag else 'No title'
+        title_tag = soup.find("title")
+        return title_tag.get_text(strip=True) if title_tag else "No title"
 
-    def _detect_supported_formats(self, soup: BeautifulSoup, html_text: str) -> List[str]:
-        """检测支持的链接格式"""
-        formats = []
+    def _detect_editor_format(self, soup: BeautifulSoup) -> Optional[Dict]:
+        combined_text = self._collect_editor_context(soup)
+        combined_lower = combined_text.lower()
 
-        # 检测 HTML 支持
-        if self._check_html_support(soup, html_text):
-            formats.append('html')
-
-        # 检测 Markdown 支持
-        if self._check_markdown_support(soup, html_text):
-            formats.append('markdown')
-
-        # 检测 BBCode 支持
-        if self._check_bbcode_support(soup, html_text):
-            formats.append('bbcode')
-
-        # 默认支持纯文本
-        formats.append('plain_text')
-
-        return formats
-
-    def _check_html_support(self, soup: BeautifulSoup, html_text: str) -> bool:
-        """检测 HTML 格式支持"""
-        indicators = [
-            # 富文本编辑器
-            'contenteditable="true"',
-            'wysiwyg',
-            'rich-editor',
-            'html-editor',
-            # 常见的 HTML 标签提示
-            '&lt;a href',
-            '<a href',
-            'HTML tags allowed',
-            'html is allowed'
-        ]
-
-        html_lower = html_text.lower()
-        return any(indicator.lower() in html_lower for indicator in indicators)
-
-    def _check_markdown_support(self, soup: BeautifulSoup, html_text: str) -> bool:
-        """检测 Markdown 格式支持"""
-        indicators = [
-            'markdown',
-            'md-editor',
-            'supports markdown',
-            '**bold**',
-            '*italic*',
-            '[link](url)',
-            'markdown formatting'
-        ]
-
-        html_lower = html_text.lower()
-        return any(indicator.lower() in html_lower for indicator in indicators)
-
-    def _check_bbcode_support(self, soup: BeautifulSoup, html_text: str) -> bool:
-        """检测 BBCode 格式支持"""
-        indicators = [
-            'bbcode',
-            '[url=',
-            '[b]',
-            '[i]',
-            'BB Code',
-            'bbcode is on',
-            '[url]http'
-        ]
-
-        html_lower = html_text.lower()
-        return any(indicator.lower() in html_lower for indicator in indicators)
-
-    def _detect_comment_system(self, soup: BeautifulSoup) -> Dict:
-        """检测评论系统类型"""
-        for system_name, selectors in self.comment_systems.items():
-            for selector in selectors:
-                if soup.find(attrs={'class': lambda x: x and selector in x.lower() if x else False}) or \
-                   soup.find(attrs={'id': lambda x: x and selector in x.lower() if x else False}):
-                    return {'type': system_name, 'detected': True}
-
-        # 检查是否有评论表单
-        comment_forms = soup.find_all('form')
-        for form in comment_forms:
-            form_text = str(form).lower()
-            if any(word in form_text for word in ['comment', 'reply', 'message']):
-                return {'type': 'custom', 'detected': True, 'has_form': True}
-
-        return {'type': 'unknown', 'detected': False}
-
-    def _detect_rich_editor(self, soup: BeautifulSoup, html_text: str) -> Dict:
-        """检测富文本编辑器"""
-        html_lower = html_text.lower()
-
-        for editor_name, selectors in self.rich_editors.items():
-            for selector in selectors:
-                if selector.lower() in html_lower:
-                    return {'type': editor_name, 'detected': True}
-
-        return {'type': 'none', 'detected': False}
-
-    def _analyze_forms(self, soup: BeautifulSoup) -> List[Dict]:
-        """分析页面上的表单"""
-        forms = []
-
-        for form in soup.find_all('form'):
-            form_info = {
-                'action': form.get('action', ''),
-                'method': form.get('method', 'GET').upper(),
-                'fields': [],
-                'has_file_upload': False,
-                'has_captcha': False
+        if any(re.search(pattern, combined_lower, re.IGNORECASE) for pattern in MARKDOWN_PATTERNS):
+            return {
+                "recommended_format": "markdown",
+                "evidence_type": "editor_markdown",
+                "confidence": 0.98,
             }
 
-            # 分析表单字段
-            for input_tag in form.find_all(['input', 'textarea', 'select']):
-                field_info = {
-                    'type': input_tag.get('type', input_tag.name),
-                    'name': input_tag.get('name', ''),
-                    'required': input_tag.has_attr('required'),
-                    'placeholder': input_tag.get('placeholder', '')
-                }
-                form_info['fields'].append(field_info)
+        if any(re.search(pattern, combined_lower, re.IGNORECASE) for pattern in BBCODE_PATTERNS):
+            return {
+                "recommended_format": "bbcode",
+                "evidence_type": "editor_bbcode",
+                "confidence": 0.98,
+            }
 
-                # 检查文件上传
-                if input_tag.get('type') == 'file':
-                    form_info['has_file_upload'] = True
+        if any(re.search(pattern, combined_lower, re.IGNORECASE) for pattern in HTML_PATTERNS):
+            return {
+                "recommended_format": "html",
+                "evidence_type": "editor_html",
+                "confidence": 0.95,
+            }
 
-                # 检查验证码字段
-                field_name = input_tag.get('name', '').lower()
-                if any(captcha_word in field_name for captcha_word in ['captcha', 'recaptcha', 'verification']):
-                    form_info['has_captcha'] = True
+        if soup.select('[contenteditable="true"]'):
+            return {
+                "recommended_format": "html",
+                "evidence_type": "editor_html",
+                "confidence": 0.9,
+            }
 
-            forms.append(form_info)
+        if any(hint in combined_lower for hint in RICH_EDITOR_HINTS):
+            return {
+                "recommended_format": "html",
+                "evidence_type": "editor_html",
+                "confidence": 0.88,
+            }
 
+        return None
+
+    def _collect_editor_context(self, soup: BeautifulSoup) -> str:
+        parts = []
+        forms = soup.find_all("form")
+        for form in forms:
+            form_html = str(form)
+            form_text = form.get_text(" ", strip=True)
+            if not any(hint in form_html.lower() or hint in form_text.lower() for hint in COMMENT_FORM_HINTS):
+                continue
+            parts.append(form_html[:5000])
+            parts.append(form_text[:1500])
+            parent = form.parent if isinstance(form.parent, Tag) else None
+            if parent:
+                parts.append(parent.get_text(" ", strip=True)[:1500])
+
+        for editable in soup.select('[contenteditable="true"]'):
+            if _is_noise_node(editable):
+                continue
+            parent = editable.parent if isinstance(editable.parent, Tag) else None
+            parts.append(str(editable)[:2000])
+            if parent:
+                parts.append(parent.get_text(" ", strip=True)[:1500])
+
+        return " ".join(part for part in parts if part)
+
+    def _comment_regions(self, soup: BeautifulSoup) -> list[Tag]:
+        regions = []
+        for selector in COMMENT_REGION_SELECTORS:
+            regions.extend(soup.select(selector))
+        if regions:
+            return _dedupe_nodes([node for node in regions if not _is_noise_node(node)])
+
+        fallback_forms = []
+        for form in soup.find_all("form"):
+            text = f"{form.get_text(' ', strip=True)} {str(form)}".lower()
+            if any(hint in text for hint in COMMENT_FORM_HINTS):
+                fallback_forms.append(form.parent if isinstance(form.parent, Tag) else form)
+        return _dedupe_nodes([node for node in fallback_forms if isinstance(node, Tag) and not _is_noise_node(node)])
+
+    def _comment_blocks(self, soup: BeautifulSoup) -> list[Tag]:
+        blocks = []
+        for region in self._comment_regions(soup):
+            for selector in COMMENT_BLOCK_SELECTORS:
+                blocks.extend(region.select(selector))
+
+        if not blocks:
+            for selector in COMMENT_BLOCK_SELECTORS:
+                blocks.extend(soup.select(selector))
+
+        filtered = []
+        for block in _dedupe_nodes(blocks):
+            if _is_noise_node(block):
+                continue
+            text = block.get_text(" ", strip=True)
+            if len(text) < 20:
+                continue
+            filtered.append(block)
+        return filtered[:80]
+
+    def _comment_forms(self, soup: BeautifulSoup) -> list[Tag]:
+        forms = []
+        for form in soup.find_all("form"):
+            form_html = str(form).lower()
+            form_text = form.get_text(" ", strip=True).lower()
+            if any(hint in form_html or hint in form_text for hint in COMMENT_FORM_HINTS):
+                forms.append(form)
         return forms
 
-    def _detect_captcha(self, soup: BeautifulSoup, html_text: str) -> Dict:
-        """检测验证码"""
-        captcha_indicators = [
-            'recaptcha',
-            'g-recaptcha',
-            'captcha',
-            'hcaptcha',
-            'cloudflare',
-            'verification code',
-            'security question'
-        ]
+    def _has_website_field(self, form: Tag) -> bool:
+        form_html = str(form).lower()
+        form_text = form.get_text(" ", strip=True).lower()
+        return any(hint in form_html or hint in form_text for hint in WEBSITE_FIELD_HINTS)
 
-        html_lower = html_text.lower()
-        detected_types = []
+    def _has_comment_list_signal(self, soup: BeautifulSoup) -> bool:
+        return bool(
+            soup.select(
+                ".comment-list, .commentlist, .commentList, .comments-list, "
+                ".comment-entry, .comment-container, .commentContainer, "
+                ".comments-count-wrapper, [id^='comment-'], article.comment, li.comment"
+            )
+        )
 
-        for indicator in captcha_indicators:
-            if indicator in html_lower:
-                detected_types.append(indicator)
+    def _detect_historical_comment_format(self, soup: BeautifulSoup) -> Optional[Dict]:
+        saw_autolink = False
+        for block in self._comment_blocks(soup):
+            anchors = block.find_all("a")
+            for anchor in anchors:
+                href = str(anchor.get("href", "") or "").strip()
+                text = anchor.get_text(" ", strip=True)
+                if not href or href.startswith("#") or href.startswith("javascript:") or href.startswith("mailto:"):
+                    continue
+                if text.lower() in GENERIC_LINK_TEXTS:
+                    continue
 
-        return {
-            'detected': len(detected_types) > 0,
-            'types': detected_types
-        }
+                normalized_href = _normalize_url_text(href)
+                normalized_text = _normalize_url_text(text)
 
-    def _check_registration_required(self, soup: BeautifulSoup) -> bool:
-        """检查是否需要注册"""
-        indicators = [
-            'login required',
-            'sign in to comment',
-            'register to post',
-            'member login',
-            'authentication required'
-        ]
+                if _looks_like_bare_url(text) and (
+                    normalized_text == normalized_href
+                    or normalized_text in normalized_href
+                    or normalized_href in normalized_text
+                ):
+                    saw_autolink = True
+                    continue
 
-        page_text = soup.get_text().lower()
-        return any(indicator in page_text for indicator in indicators)
+                if text and normalized_text and normalized_text != normalized_href:
+                    return {
+                        "recommended_format": "html",
+                        "evidence_type": "historical_anchor_text_link",
+                        "confidence": 0.82,
+                    }
 
-    def _detect_social_login(self, soup: BeautifulSoup) -> List[str]:
-        """检测社交登录选项"""
-        social_platforms = ['facebook', 'google', 'twitter', 'github', 'linkedin', 'discord']
-        detected = []
+        if saw_autolink:
+            return {
+                "recommended_format": "plain_text_autolink",
+                "evidence_type": "historical_autolink",
+                "confidence": 0.74,
+            }
 
-        for platform in social_platforms:
-            if soup.find(attrs={'class': lambda x: x and platform in x.lower() if x else False}) or \
-               soup.find('a', href=lambda x: x and platform in x.lower() if x else False):
-                detected.append(platform)
+        return None
 
-        return detected
+    def _detect_form_capability_fallback(self, soup: BeautifulSoup) -> Optional[Dict]:
+        comment_forms = self._comment_forms(soup)
+        if not comment_forms:
+            return None
 
-    def _extract_content_guidelines(self, soup: BeautifulSoup) -> Dict:
-        """提取内容指导原则"""
-        guidelines_text = ""
+        has_website_field = any(self._has_website_field(form) for form in comment_forms)
+        has_comment_list = self._has_comment_list_signal(soup)
 
-        # 查找可能包含指导原则的区域
-        guidelines_selectors = [
-            'guidelines', 'rules', 'policy', 'terms',
-            'posting-rules', 'community-guidelines'
-        ]
+        if has_website_field and has_comment_list:
+            return {
+                "recommended_format": "html",
+                "evidence_type": "comment_form_website_and_history",
+                "confidence": 0.56,
+            }
 
-        for selector in guidelines_selectors:
-            elements = soup.find_all(attrs={'class': lambda x: x and selector in x.lower() if x else False})
-            for element in elements:
-                guidelines_text += element.get_text() + " "
+        return None
 
-        return {
-            'found': len(guidelines_text.strip()) > 0,
-            'content': guidelines_text.strip()[:500]  # 限制长度
-        }
-
-    def _identify_platform_type(self, soup: BeautifulSoup, html_text: str) -> str:
-        """识别平台类型"""
-        html_lower = html_text.lower()
-
-        platform_indicators = {
-            'wordpress': ['wp-content', 'wordpress', 'wp-includes'],
-            'drupal': ['drupal', 'sites/all/modules'],
-            'joomla': ['joomla', 'option=com_'],
-            'phpbb': ['phpbb', 'viewtopic.php'],
-            'vbulletin': ['vbulletin', 'showthread.php'],
-            'discourse': ['discourse', 'ember-app'],
-            'reddit': ['reddit.com'],
-            'disqus': ['disqus.com'],
-            'medium': ['medium.com'],
-            'blogger': ['blogger.com', 'blogspot.com']
-        }
-
-        for platform, indicators in platform_indicators.items():
-            if any(indicator in html_lower for indicator in indicators):
-                return platform
-
-        return 'unknown'
-
-    def _extract_meta_info(self, soup: BeautifulSoup) -> Dict:
-        """提取元数据信息"""
-        meta_info = {}
-
-        # 获取描述
-        description = soup.find('meta', attrs={'name': 'description'})
-        if description:
-            meta_info['description'] = description.get('content', '')
-
-        # 获取关键词
-        keywords = soup.find('meta', attrs={'name': 'keywords'})
-        if keywords:
-            meta_info['keywords'] = keywords.get('content', '')
-
-        # 获取语言
-        html_tag = soup.find('html')
-        if html_tag:
-            meta_info['language'] = html_tag.get('lang', 'unknown')
-
-        return meta_info
-
-    def batch_analyze(self, urls: List[str], delay: Tuple[int, int] = (1, 3)) -> Dict:
-        """批量分析网站"""
+    def batch_analyze(self, urls: list[str]) -> dict[str, Dict]:
         results = {}
-
-        for i, url in enumerate(urls, 1):
-            print(f"处理 {i}/{len(urls)}: {url}")
-
-            try:
-                results[url] = self.analyze_website(url)
-
-                # 随机延迟避免被封
-                if i < len(urls):
-                    sleep_time = random.randint(delay[0], delay[1])
-                    time.sleep(sleep_time)
-
-            except Exception as e:
-                results[url] = {'error': str(e), 'status': 'failed'}
-                print(f"分析失败: {url} - {e}")
-
+        for url in urls:
+            results[url] = self.analyze_website(url)
         return results
 
-def main():
-    """主函数 - 测试用例"""
-    detector = WebsiteFormatDetector()
 
-    # 测试 URL
+def main():
+    detector = WebsiteFormatDetector()
     test_urls = [
-        "https://www.reddit.com/r/test/",
-        "https://stackoverflow.com/questions/ask",
-        "https://github.com/new/issue"
+        "https://www.learnalanguage.com/blog/italian-greetings-how-are-you-in-italian/",
+        "https://www.beautythroughimperfection.com/reindeer-donuts/",
     ]
 
     for url in test_urls:
-        print(f"\\n{'='*50}")
+        print(f"\n{'=' * 50}")
         result = detector.analyze_website(url)
+        print(result)
 
-        if 'error' not in result:
-            print(f"网站: {result['title']}")
-            print(f"支持格式: {', '.join(result['supported_formats'])}")
-            print(f"评论系统: {result['comment_system']}")
-            print(f"需要注册: {result['registration_required']}")
-            print(f"验证码: {result['captcha_detected']}")
-            print(f"平台类型: {result['platform_type']}")
-        else:
-            print(f"分析失败: {result['error']}")
 
 if __name__ == "__main__":
     main()

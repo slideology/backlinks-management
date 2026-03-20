@@ -3,12 +3,67 @@
         "url": "https://open.feishu.cn/open-apis/bot/v2/hook/0bde20e9-1cc2-4046-b99e-91cd5d219351"
     },
     "scheduler": {
-        "daily_limit": 1,
-        "priority_order": ["high", "medium", "low"],
-        "retry_after_days": 3
+        "daily_limit": 20,
+        "priority_order": [
+            "high",
+            "medium",
+            "low"
+        ],
+        "retry_after_days": 3,
+        "success_buffer_multiplier": 3,
+        "max_task_pool": 40,
+        "max_rounds_per_day": 5
     },
-    "posting": {
-        "max_retries": 2,
-        "page_load_timeout_ms": 20000
+    "execution": {
+        "success_goal": 10,
+        "page_load_timeout_ms": 20000,
+        "max_retries": 1,
+        "enable_sso": false
+    },
+    "vision": {
+        "enabled": true,
+        "debug_dir": "artifacts/vision"
+    },
+    "legacy_history": {
+        "enabled": true,
+        "spreadsheet_token": "DhMBsqDNKh0dI4trm5Rc3tJEnyb",
+        "skip_sheet_titles": [
+            "汇总",
+            "Sheet54"
+        ],
+        "cache_file": "artifacts/legacy_history/cache.json",
+        "cache_ttl_hours": 12,
+        "min_page_ascore": 10,
+        "report_dir": "artifacts/legacy_history/reports",
+        "promoted_site_map": {
+            "bearclicker.net": "bearclicker.net",
+            "www.bearclicker.net": "bearclicker.net",
+            "nanobananaimage.org": "nanobananaimage.org",
+            "www.nanobananaimage.org": "nanobananaimage.org",
+            "nanobananaimage.com": "nanobananaimage.org",
+            "www.nanobananaimage.com": "nanobananaimage.org"
+        }
+    },
+    "reporting_workbook": {
+        "enabled": true,
+        "workbook_title": "外链运营总表",
+        "state_file": "artifacts/reporting_workbook/state.json",
+        "sheet_titles": {
+            "sources": "来源总表",
+            "records": "发布记录表",
+            "targets": "目标站表",
+            "history": "历史去重表",
+            "library": "旧表全量来源库"
+        }
+    },
+    "feishu": {
+        "enabled": true,
+        "app_id": "cli_a9395d5703789bcd",
+        "app_secret": "RCKcGuNO9xdhOU3qXs4kigzVcMCwG5rI",
+        "spreadsheet_token": "QVNpsPYeyhii9dt1txJcWOxhnQ2",
+        "sheet_id": "738d2a",
+        "auth_mode": "user",
+        "redirect_uri": "http://127.0.0.1:8787/callback",
+        "user_token_file": ".feishu_user_token.json"
     }
 }

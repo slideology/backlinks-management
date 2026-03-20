@@ -1,14 +1,15 @@
 from feishu_integration import create_feishu_client
 from gws_integration import GoogleSheetsManager
 from sheet_localization import (
-    FREE_TEXT_COLUMNS,
     GOOGLE_HEADERS,
+    LOCALIZED_TEXT_COLUMNS,
     localize_basic_value,
     localize_note_phrases,
     needs_free_text_translation,
     row_to_ordered_values,
     translate_indexed_fields_to_chinese,
 )
+from ai_generator import translate_comment_to_chinese
 import time
 
 
@@ -24,7 +25,7 @@ def localize_chunk(chunk_rows: list[tuple[int, dict[str, str]]]) -> list[tuple[i
         localized = {}
         for column in GOOGLE_HEADERS:
             value = str(row_dict.get(column, "") or "")
-            if column in FREE_TEXT_COLUMNS and needs_free_text_translation(column, value):
+            if column in LOCALIZED_TEXT_COLUMNS and needs_free_text_translation(column, value):
                 pending_translations[f"row_{row_index}_{column}"] = (column, value)
                 continue
             localized[column] = localize_basic_value(column, value)
@@ -32,7 +33,7 @@ def localize_chunk(chunk_rows: list[tuple[int, dict[str, str]]]) -> list[tuple[i
 
     translated = translate_indexed_fields_to_chinese(pending_translations)
     for row_index, localized in localized_rows:
-        for column in FREE_TEXT_COLUMNS:
+        for column in LOCALIZED_TEXT_COLUMNS:
             token = f"row_{row_index}_{column}"
             if token in translated:
                 localized_value = translated[token]
@@ -87,6 +88,13 @@ def main():
                 localized = str(localized_row.get(column, "") or "")
                 if original != localized and column in manager.col_map:
                     updates[column] = localized
+
+            comment_translation = str(original_row.get("Comment_Content_ZH", "") or "").strip()
+            comment_content = str(localized_row.get("Comment_Content", "") or original_row.get("Comment_Content", "") or "").strip()
+            if not comment_translation and comment_content:
+                translated_comment = translate_comment_to_chinese(comment_content)
+                updates["Comment_Content_ZH"] = translated_comment
+                localized_row["Comment_Content_ZH"] = translated_comment
 
             if updates:
                 translated_count += 1

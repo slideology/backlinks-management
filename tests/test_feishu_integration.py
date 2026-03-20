@@ -46,7 +46,7 @@ class FeishuIntegrationTests(unittest.TestCase):
         row_index = client.upsert_backlink_row(7, row)
 
         self.assertEqual(row_index, 7)
-        client.write_range.assert_called_once_with("sheet_id!A7:S7", [row])
+        client.write_range.assert_called_once_with("sheet_id!A7:T7", [row])
 
 
 if __name__ == "__main__":

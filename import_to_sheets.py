@@ -50,13 +50,13 @@ def read_excel_data(file_path):
 
 
 def build_full_header():
-    """构建完整的 19 列表头（7列原始 + 12列新增管理字段）"""
+    """构建完整的 20 列表头（8列原始 + 12列新增管理字段）"""
     return [
         # 原始 7 列
         'ID', 'Type', 'URL', 'Discovered_From', 'Has_Captcha', 'Link_Strategy', 'Link_Format', 'Has_URL_Field',
-        # 新增 11 列管理字段
+        # 新增 12 列管理字段
         'Status', 'Priority', 'Target_Website', 'Keywords', 'Anchor_Text',
-        'Comment_Content', 'Execution_Date', 'Success_URL', 'Notes', 'Last_Updated', 'Daily_Batch'
+        'Comment_Content', 'Comment_Content_ZH', 'Execution_Date', 'Success_URL', 'Notes', 'Last_Updated', 'Daily_Batch'
     ]
 
 
@@ -74,7 +74,7 @@ def build_rows_for_sheets(excel_data):
             + original         # 原始 7 列
             + ['pending']      # Status 默认 pending
             + ['medium']       # Priority 默认 medium
-            + [''] * 9         # 其他 9 个新增字段留空
+            + [''] * 10        # 其他 10 个新增字段留空
         )
         rows.append(full_row)
 
@@ -220,7 +220,7 @@ def apply_formatting(sheets_service, spreadsheet_id, sheet_id, total_rows):
     # 7. 自动调整列宽
     requests.append({
         'autoResizeDimensions': {
-            'dimensions': {'sheetId': sheet_id, 'dimension': 'COLUMNS', 'startIndex': 0, 'endIndex': 19}
+            'dimensions': {'sheetId': sheet_id, 'dimension': 'COLUMNS', 'startIndex': 0, 'endIndex': 20}
         }
     })
 
@@ -228,7 +228,7 @@ def apply_formatting(sheets_service, spreadsheet_id, sheet_id, total_rows):
     requests.append({
         'setBasicFilter': {
             'filter': {
-                'range': {'sheetId': sheet_id, 'startRowIndex': 0, 'endRowIndex': total_rows, 'startColumnIndex': 0, 'endColumnIndex': 19}
+                'range': {'sheetId': sheet_id, 'startRowIndex': 0, 'endRowIndex': total_rows, 'startColumnIndex': 0, 'endColumnIndex': 20}
             }
         }
     })
