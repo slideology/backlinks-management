@@ -12,7 +12,7 @@ from sheet_localization import FEISHU_HEADERS_ZH, GOOGLE_HEADERS
 
 
 logger = logging.getLogger(__name__)
-OVERWRITE_CHUNK_SIZE = 2000
+OVERWRITE_CHUNK_SIZE = 500
 
 DEFAULT_HEADERS = [
     "Execution Time",
@@ -79,7 +79,9 @@ class FeishuClient:
         redirect_uri: str = "http://127.0.0.1:8787/callback",
         user_token_file: str = ".feishu_user_token.json",
         scopes: Optional[list[str]] = None,
-        timeout: int = 10,
+        timeout: int = 20,
+        request_retries: int = 3,
+        request_backoff_seconds: float = 2.0,
     ):
         self.app_id = app_id
         self.app_secret = app_secret
@@ -90,6 +92,8 @@ class FeishuClient:
         self.user_token_file = user_token_file
         self.scopes = scopes or ["offline_access", "sheets:spreadsheet", "sheets:spreadsheet:readonly"]
         self.timeout = timeout
+        self.request_retries = max(1, int(request_retries))
+        self.request_backoff_seconds = max(0.0, float(request_backoff_seconds))
         self._tenant_access_token: Optional[str] = None
         self._app_access_token: Optional[str] = None
 
@@ -111,7 +115,36 @@ class FeishuClient:
             redirect_uri=config.get("redirect_uri", "http://127.0.0.1:8787/callback"),
             user_token_file=config.get("user_token_file", ".feishu_user_token.json"),
             scopes=config.get("scopes"),
+            timeout=int(config.get("timeout_seconds", 20) or 20),
+            request_retries=int(config.get("request_retries", 3) or 3),
+            request_backoff_seconds=float(config.get("request_backoff_seconds", 2) or 2),
         )
+
+    def _request_with_retry(self, method: str, url: str, **kwargs):
+        requester = getattr(requests, method.lower())
+        last_error = None
+        for attempt in range(1, self.request_retries + 1):
+            try:
+                response = requester(url, timeout=self.timeout, **kwargs)
+                if response.status_code >= 500 or response.status_code == 429:
+                    response.raise_for_status()
+                return response
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, requests.exceptions.HTTPError) as exc:
+                last_error = exc
+                if attempt >= self.request_retries:
+                    raise
+                logger.warning(
+                    "飞书请求失败，准备重试 (%s/%s): %s %s | %s",
+                    attempt,
+                    self.request_retries,
+                    method.upper(),
+                    url,
+                    exc,
+                )
+                if self.request_backoff_seconds > 0:
+                    time.sleep(self.request_backoff_seconds * attempt)
+        if last_error:
+            raise last_error
 
     def get_authorization_url(self, state: Optional[str] = None) -> tuple[str, str]:
         actual_state = state or secrets.token_urlsafe(24)
@@ -153,10 +186,10 @@ class FeishuClient:
         if self._tenant_access_token:
             return self._tenant_access_token
 
-        response = requests.post(
+        response = self._request_with_retry(
+            "post",
             "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal/",
             json={"app_id": self.app_id, "app_secret": self.app_secret},
-            timeout=self.timeout,
         )
         response.raise_for_status()
         data = response.json()
@@ -170,10 +203,10 @@ class FeishuClient:
         if self._app_access_token:
             return self._app_access_token
 
-        response = requests.post(
+        response = self._request_with_retry(
+            "post",
             "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal/",
             json={"app_id": self.app_id, "app_secret": self.app_secret},
-            timeout=self.timeout,
         )
         response.raise_for_status()
         data = response.json()
@@ -184,7 +217,8 @@ class FeishuClient:
 
     def exchange_code_for_user_token(self, code: str) -> dict:
         app_access_token = self.get_app_access_token()
-        response = requests.post(
+        response = self._request_with_retry(
+            "post",
             "https://open.feishu.cn/open-apis/authen/v1/access_token",
             headers={
                 "Authorization": f"Bearer {app_access_token}",
@@ -196,7 +230,6 @@ class FeishuClient:
                 "app_id": self.app_id,
                 "app_secret": self.app_secret,
             },
-            timeout=self.timeout,
         )
         response.raise_for_status()
         data = response.json()
@@ -208,7 +241,8 @@ class FeishuClient:
 
     def refresh_user_access_token(self, refresh_token: str) -> dict:
         app_access_token = self.get_app_access_token()
-        response = requests.post(
+        response = self._request_with_retry(
+            "post",
             "https://open.feishu.cn/open-apis/authen/v1/refresh_access_token",
             headers={
                 "Authorization": f"Bearer {app_access_token}",
@@ -220,7 +254,6 @@ class FeishuClient:
                 "app_id": self.app_id,
                 "app_secret": self.app_secret,
             },
-            timeout=self.timeout,
         )
         response.raise_for_status()
         data = response.json()
@@ -255,10 +288,10 @@ class FeishuClient:
 
     def read_range(self, value_range: str) -> list[list[str]]:
         encoded_range = requests.utils.quote(value_range, safe="")
-        response = requests.get(
+        response = self._request_with_retry(
+            "get",
             f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{self.spreadsheet_token}/values/{encoded_range}",
             headers=self.build_headers(),
-            timeout=self.timeout,
         )
         response.raise_for_status()
         data = response.json()
@@ -268,11 +301,11 @@ class FeishuClient:
         return data.get("data", {}).get("valueRange", {}).get("values", []) or []
 
     def write_range(self, value_range: str, values: list[list[str]]) -> None:
-        response = requests.put(
+        response = self._request_with_retry(
+            "put",
             f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{self.spreadsheet_token}/values",
             headers=self.build_headers(),
             json={"valueRange": {"range": value_range, "values": values}},
-            timeout=self.timeout,
         )
         response.raise_for_status()
         data = response.json()
@@ -280,11 +313,11 @@ class FeishuClient:
             raise RuntimeError(f"写入飞书表格失败: {data}")
 
     def create_spreadsheet(self, title: str, as_user: Optional[bool] = None) -> dict:
-        response = requests.post(
+        response = self._request_with_retry(
+            "post",
             "https://open.feishu.cn/open-apis/sheets/v3/spreadsheets",
             headers=self.build_headers(as_user=as_user),
             json={"title": title},
-            timeout=self.timeout,
         )
         response.raise_for_status()
         data = response.json()
@@ -300,10 +333,10 @@ class FeishuClient:
 
     def get_sheet_metainfo(self, spreadsheet_token: Optional[str] = None, as_user: Optional[bool] = None) -> list[dict]:
         actual_token = spreadsheet_token or self.spreadsheet_token
-        response = requests.get(
+        response = self._request_with_retry(
+            "get",
             f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{actual_token}/metainfo",
             headers=self.build_headers(as_user=as_user),
-            timeout=self.timeout,
         )
         response.raise_for_status()
         data = response.json()
@@ -329,11 +362,11 @@ class FeishuClient:
         as_user: Optional[bool] = None,
     ) -> dict:
         actual_token = spreadsheet_token or self.spreadsheet_token
-        response = requests.post(
+        response = self._request_with_retry(
+            "post",
             f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{actual_token}/sheets_batch_update",
             headers=self.build_headers(as_user=as_user),
             json={"requests": requests_payload},
-            timeout=self.timeout,
         )
         response.raise_for_status()
         data = response.json()
@@ -380,16 +413,22 @@ class FeishuClient:
         self.spreadsheet_token = spreadsheet_token
         self.sheet_id = sheet_id
 
+    def count_nonempty_rows(self, sheet_id: str, max_rows: int = 50000) -> int:
+        first_col_rows = self.read_range(f"{sheet_id}!A1:A{max_rows}")
+        existing_nonempty_rows = 0
+        for index, row in enumerate(first_col_rows, start=1):
+            cell = row[0] if row else ""
+            if str(cell or "").strip():
+                existing_nonempty_rows = index
+        return existing_nonempty_rows
+
     def overwrite_sheet_rows(self, sheet_id: str, headers: list[str], rows: list[list[str]]) -> int:
         self.attach_spreadsheet(self.spreadsheet_token, sheet_id)
         last_col = _column_letter(len(headers))
         all_rows = [headers] + rows
         total_rows = len(all_rows)
-        existing_rows = self.read_range(f"{sheet_id}!A1:{last_col}50000")
-        existing_nonempty_rows = 0
-        for index, row in enumerate(existing_rows, start=1):
-            if any(str(cell or "").strip() for cell in row):
-                existing_nonempty_rows = index
+        # 只读取第一列来判断现有有效行数，避免大表在覆盖前整块读取时触发飞书 10MB 返回限制。
+        existing_nonempty_rows = self.count_nonempty_rows(sheet_id)
 
         start = 0
         while start < total_rows:

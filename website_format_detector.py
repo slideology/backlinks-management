@@ -5,10 +5,12 @@
 """
 
 import re
+from urllib.parse import urlparse
 from typing import Dict, Iterable, Optional
 
 import requests
 from bs4 import BeautifulSoup, Tag
+from playwright.sync_api import Page
 
 
 COMMENT_REGION_SELECTORS = (
@@ -81,6 +83,26 @@ RICH_EDITOR_HINTS = (
     "html-editor",
 )
 
+RUNTIME_WEBSITE_SELECTORS = (
+    'input[name*="url"]',
+    'input[id*="url"]',
+    'input[name*="website"]',
+    'input[id*="website"]',
+    'input[placeholder*="Website"]',
+    'input[placeholder*="Url"]',
+)
+
+RUNTIME_SUBMIT_SELECTORS = (
+    'input[type="submit"]',
+    'button[type="submit"]',
+    'button:has-text("Publish")',
+    'button:has-text("Post")',
+    'button:has-text("Comment")',
+    'button:has-text("Submit")',
+    'div[role="button"]:has-text("Publish")',
+    '[aria-label*="Publish"]',
+)
+
 WEBSITE_FIELD_HINTS = (
     'name="url"',
     "name='url'",
@@ -122,6 +144,79 @@ def _normalize_url_text(value: str) -> str:
     text = re.sub(r"^https?://", "", text)
     text = re.sub(r"^www\.", "", text)
     return text.rstrip("/").strip()
+
+
+def _looks_like_blogger_url(url: str) -> bool:
+    hostname = (urlparse(str(url or "")).hostname or "").lower()
+    return "blogspot." in hostname or hostname.endswith(".blogger.com") or hostname == "blogger.com"
+
+
+def _normalize_probe_result(url: str, result: Optional[Dict], fallback_stage: str) -> Dict:
+    payload = dict(result or {})
+    payload["url"] = url
+    payload["recommended_format"] = str(payload.get("recommended_format", "unknown") or "unknown").strip()
+    payload["evidence_type"] = str(payload.get("evidence_type", "unknown") or "unknown").strip()
+    try:
+        payload["confidence"] = float(payload.get("confidence", 0) or 0)
+    except Exception:
+        payload["confidence"] = 0.0
+    payload["stage"] = str(payload.get("stage", fallback_stage) or fallback_stage)
+    payload["supported_formats"] = payload.get("supported_formats") or [payload["recommended_format"]]
+    return payload
+
+
+def _is_weak_format(result: Optional[Dict], threshold: float = 0.8) -> bool:
+    if not result:
+        return True
+    fmt = str(result.get("recommended_format", "unknown") or "unknown").strip()
+    confidence = float(result.get("confidence", 0) or 0)
+    return fmt in {"unknown", "plain_text_autolink"} or confidence < threshold
+
+
+def _prefer_stronger_result(base: Dict, candidate: Optional[Dict]) -> Dict:
+    if not candidate:
+        return dict(base)
+    candidate = dict(candidate)
+    base_fmt = str(base.get("recommended_format", "unknown") or "unknown")
+    candidate_fmt = str(candidate.get("recommended_format", "unknown") or "unknown")
+    if candidate_fmt == "html" and base_fmt != "html":
+        return candidate
+    if base_fmt == "unknown" and candidate_fmt != "unknown":
+        return candidate
+    if base_fmt == "plain_text_autolink" and candidate_fmt == "plain_text":
+        return base
+    if float(candidate.get("confidence", 0) or 0) > float(base.get("confidence", 0) or 0):
+        return candidate
+    return dict(base)
+
+
+def _is_probe_error_result(result: Optional[Dict]) -> bool:
+    if not result:
+        return False
+    evidence_type = str(result.get("evidence_type", "") or "").strip().lower()
+    return evidence_type in {
+        "vision_api_error",
+        "vision_invalid_json",
+        "vision_probe_error",
+        "runtime_probe_error",
+    }
+
+
+def _has_probe_conflict(static_result: Dict, runtime_result: Optional[Dict], vision_result: Optional[Dict]) -> bool:
+    static_fmt = str(static_result.get("recommended_format", "unknown") or "unknown")
+    runtime_fmt = str((runtime_result or {}).get("recommended_format", "unknown") or "unknown")
+    vision_fmt = str((vision_result or {}).get("recommended_format", "unknown") or "unknown")
+
+    if runtime_result and not _is_probe_error_result(runtime_result) and static_fmt == "plain_text_autolink" and runtime_fmt == "html":
+        return True
+
+    if runtime_result and not _is_probe_error_result(runtime_result) and static_fmt == "html" and runtime_fmt in {"unknown", "plain_text_autolink", "plain_text"}:
+        return True
+
+    if runtime_result and vision_result and not _is_probe_error_result(vision_result) and runtime_fmt != vision_fmt:
+        return True
+
+    return False
 
 
 def _looks_like_bare_url(text: str) -> bool:
@@ -232,6 +327,18 @@ class WebsiteFormatDetector:
                     "supported_formats": [fallback_result["recommended_format"]],
                 }
 
+            blogger_result = self._detect_blogger_capability(soup, url)
+            if blogger_result:
+                return {
+                    "url": url,
+                    "status_code": response.status_code,
+                    "title": self._get_title(soup),
+                    "recommended_format": blogger_result["recommended_format"],
+                    "evidence_type": blogger_result["evidence_type"],
+                    "confidence": blogger_result["confidence"],
+                    "supported_formats": [blogger_result["recommended_format"]],
+                }
+
             return {
                 "url": url,
                 "status_code": response.status_code,
@@ -251,6 +358,202 @@ class WebsiteFormatDetector:
                 "confidence": 0.0,
                 "supported_formats": ["unknown"],
             }
+
+    def analyze_runtime_page(self, page: Page, url: str) -> Dict:
+        try:
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except Exception:
+                pass
+            try:
+                page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:
+                pass
+            try:
+                page.evaluate("() => window.scrollTo(0, document.body.scrollHeight * 0.7)")
+                page.wait_for_timeout(800)
+            except Exception:
+                pass
+
+            rendered_soup = BeautifulSoup(page.content(), "html.parser")
+
+            editor_result = self._detect_editor_format(rendered_soup)
+            if editor_result:
+                return _normalize_probe_result(
+                    url,
+                    {
+                        **editor_result,
+                        "stage": "runtime_probe",
+                    },
+                    "runtime_probe",
+                )
+
+            history_result = self._detect_historical_comment_format(rendered_soup)
+            if history_result:
+                return _normalize_probe_result(
+                    url,
+                    {
+                        **history_result,
+                        "stage": "runtime_probe",
+                    },
+                    "runtime_probe",
+                )
+
+            fallback_result = self._detect_form_capability_fallback(rendered_soup)
+            if fallback_result:
+                return _normalize_probe_result(
+                    url,
+                    {
+                        **fallback_result,
+                        "stage": "runtime_probe",
+                    },
+                    "runtime_probe",
+                )
+
+            blogger_result = self._detect_blogger_capability(rendered_soup, page.url)
+            if blogger_result:
+                return _normalize_probe_result(
+                    url,
+                    {
+                        **blogger_result,
+                        "stage": "runtime_probe",
+                    },
+                    "runtime_probe",
+                )
+
+            if self._runtime_has_visible_contenteditable(page):
+                return _normalize_probe_result(
+                    url,
+                    {
+                        "recommended_format": "html",
+                        "evidence_type": "runtime_contenteditable",
+                        "confidence": 0.9,
+                        "stage": "runtime_probe",
+                    },
+                    "runtime_probe",
+                )
+
+            frame_probe = self._runtime_iframe_probe(page)
+            if frame_probe:
+                return _normalize_probe_result(url, frame_probe, "runtime_probe")
+
+            if self._runtime_has_visible_textarea(page) and self._runtime_has_visible_website_field(page):
+                return _normalize_probe_result(
+                    url,
+                    {
+                        "recommended_format": "html",
+                        "evidence_type": "runtime_textarea_website_field",
+                        "confidence": 0.76,
+                        "stage": "runtime_probe",
+                    },
+                    "runtime_probe",
+                )
+
+            return _normalize_probe_result(
+                url,
+                {
+                    "recommended_format": "unknown",
+                    "evidence_type": "runtime_unknown",
+                    "confidence": 0.0,
+                    "stage": "runtime_probe",
+                },
+                "runtime_probe",
+            )
+        except Exception as exc:
+            return _normalize_probe_result(
+                url,
+                {
+                    "recommended_format": "unknown",
+                    "evidence_type": "runtime_probe_error",
+                    "confidence": 0.0,
+                    "error": str(exc),
+                    "stage": "runtime_probe",
+                },
+                "runtime_probe",
+            )
+
+    def analyze_page_capability(self, page: Page, url: str, enable_vision: bool = True, confidence_threshold: float = 0.8) -> Dict:
+        static_result = _normalize_probe_result(url, self.analyze_website(url), "static_only")
+        runtime_result = None
+        vision_result = None
+        page_ready = False
+
+        if _is_weak_format(static_result, threshold=confidence_threshold):
+            if not page_ready:
+                self._prepare_probe_page(page, url)
+                page_ready = True
+            runtime_result = self.analyze_runtime_page(page, url)
+
+        final_result = _prefer_stronger_result(static_result, runtime_result)
+        conflict = _has_probe_conflict(static_result, runtime_result, None)
+
+        if enable_vision and (_is_weak_format(final_result, threshold=confidence_threshold) or conflict):
+            if not page_ready:
+                self._prepare_probe_page(page, url)
+                page_ready = True
+            vision_result = self.analyze_vision_page(page, url)
+            final_result = _prefer_stronger_result(final_result, vision_result)
+            conflict = _has_probe_conflict(static_result, runtime_result, vision_result)
+
+        status = "conflict" if conflict else "failed" if final_result["recommended_format"] == "unknown" else "completed"
+        stage = "vision_probe" if vision_result else "runtime_probe" if runtime_result else "static_only"
+        return {
+            "url": url,
+            "static_result": static_result,
+            "runtime_result": runtime_result,
+            "vision_result": vision_result,
+            "final_result": _normalize_probe_result(url, {**final_result, "stage": stage}, stage),
+            "stage": stage,
+            "status": status,
+            "vision_used": bool(vision_result),
+            "conflict": conflict,
+        }
+
+    def _prepare_probe_page(self, page: Page, url: str) -> None:
+        page.goto(url, timeout=20000)
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=5000)
+        except Exception:
+            pass
+        try:
+            page.wait_for_load_state("networkidle", timeout=8000)
+        except Exception:
+            pass
+
+    def analyze_vision_page(self, page: Page, url: str) -> Optional[Dict]:
+        try:
+            from vision_agent import analyze_link_format_capability
+
+            analysis = analyze_link_format_capability(page)
+        except Exception as exc:
+            return _normalize_probe_result(
+                url,
+                {
+                    "recommended_format": "unknown",
+                    "evidence_type": "vision_probe_error",
+                    "confidence": 0.0,
+                    "error": str(exc),
+                    "stage": "vision_probe",
+                },
+                "vision_probe",
+            )
+
+        if not analysis.get("ok") or not analysis.get("result"):
+            return _normalize_probe_result(
+                url,
+                {
+                    "recommended_format": "unknown",
+                    "evidence_type": analysis.get("error_code", "vision_probe_error"),
+                    "confidence": 0.0,
+                    "reason": analysis.get("raw_text", ""),
+                    "stage": "vision_probe",
+                },
+                "vision_probe",
+            )
+
+        result = dict(analysis["result"])
+        result["stage"] = "vision_probe"
+        return _normalize_probe_result(url, result, "vision_probe")
 
     def _get_title(self, soup: BeautifulSoup) -> str:
         title_tag = soup.find("title")
@@ -434,11 +737,91 @@ class WebsiteFormatDetector:
 
         return None
 
+    def _detect_blogger_capability(self, soup: BeautifulSoup, url: str) -> Optional[Dict]:
+        page_text = soup.get_text(" ", strip=True).lower()
+        iframe_sources = [
+            str(node.get("src", "") or "").lower()
+            for node in soup.find_all("iframe")
+        ]
+
+        has_blogger_brand = _looks_like_blogger_url(url) or "powered by blogger" in page_text
+        has_blogger_comment_surface = any("blogger.com/comment" in src or "blogblog.com" in src for src in iframe_sources)
+        has_identity_menu = bool(soup.select("#identityMenu, select[name='identityMenu']"))
+        has_comment_signal = self._has_comment_list_signal(soup) or bool(self._comment_forms(soup))
+
+        if has_blogger_brand and (has_blogger_comment_surface or has_identity_menu or has_comment_signal):
+            return {
+                "recommended_format": "html",
+                "evidence_type": "blogger_comment_system",
+                "confidence": 0.72,
+            }
+
+        return None
+
     def batch_analyze(self, urls: list[str]) -> dict[str, Dict]:
         results = {}
         for url in urls:
             results[url] = self.analyze_website(url)
         return results
+
+    def _runtime_has_visible_textarea(self, page: Page) -> bool:
+        try:
+            return page.locator("textarea:visible").count() > 0
+        except Exception:
+            return False
+
+    def _runtime_has_visible_contenteditable(self, page: Page) -> bool:
+        try:
+            return page.locator('[contenteditable="true"]:visible').count() > 0
+        except Exception:
+            return False
+
+    def _runtime_has_visible_website_field(self, page: Page) -> bool:
+        for selector in RUNTIME_WEBSITE_SELECTORS:
+            try:
+                locator = page.locator(selector)
+                if locator.count() > 0 and locator.first.is_visible():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _runtime_iframe_probe(self, page: Page) -> Optional[Dict]:
+        for frame in page.frames:
+            frame_url = str(getattr(frame, "url", "") or "")
+            if not frame_url:
+                continue
+            if "blogger.com/comment" in frame_url or "blogblog.com" in frame_url:
+                return {
+                    "recommended_format": "html",
+                    "evidence_type": "runtime_blogger_iframe",
+                    "confidence": 0.86,
+                    "stage": "runtime_probe",
+                }
+            try:
+                if frame.locator('[contenteditable="true"]:visible').count() > 0:
+                    return {
+                        "recommended_format": "html",
+                        "evidence_type": "runtime_iframe_contenteditable",
+                        "confidence": 0.88,
+                        "stage": "runtime_probe",
+                    }
+                if frame.locator("textarea:visible").count() > 0:
+                    for selector in RUNTIME_SUBMIT_SELECTORS:
+                        try:
+                            btn = frame.locator(selector)
+                            if btn.count() > 0 and btn.first.is_visible():
+                                return {
+                                    "recommended_format": "html",
+                                    "evidence_type": "runtime_iframe_comment_surface",
+                                    "confidence": 0.8,
+                                    "stage": "runtime_probe",
+                                }
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+        return None
 
 
 def main():

@@ -26,6 +26,22 @@ def _read_existing_targets(workbook: FeishuWorkbook) -> list[dict]:
     return rows
 
 
+def _read_existing_source_rows(workbook: FeishuWorkbook, max_cols: int = 200) -> list[dict]:
+    headers = workbook.read_sheet_headers("sources", max_cols=max_cols)
+    if not headers:
+        return []
+
+    rows = []
+    for _, row in workbook.iter_sheet_dict_rows(
+        "sources",
+        max_cols=max_cols,
+        page_size=250,
+        headers=headers,
+    ):
+        rows.append(row)
+    return rows
+
+
 def _read_existing_status_rows(workbook: FeishuWorkbook) -> tuple[list[dict], list[dict]]:
     headers, rows = workbook.read_sheet_dicts("records", max_cols=max(len(STATUS_HEADERS), 22))
     header_set = set(headers)
@@ -50,6 +66,7 @@ def sync_reporting_workbook(workbook: Optional[FeishuWorkbook] = None):
         bootstrap_targets=load_targets(),
         promoted_site_map=legacy_config.get("promoted_site_map"),
     )
+    existing_source_rows = _read_existing_source_rows(workbook, max_cols=max(len(dynamic_source_headers(target_rows)), 200))
     existing_status_rows, old_record_rows = _read_existing_status_rows(workbook)
     migrated_rows = migrate_old_record_rows(
         old_record_rows,
@@ -65,7 +82,7 @@ def sync_reporting_workbook(workbook: Optional[FeishuWorkbook] = None):
         legacy_history_rows=history_rows,
         promoted_site_map=legacy_config.get("promoted_site_map"),
     )
-    source_rows = build_source_master_rows(status_rows, target_rows)
+    source_rows = build_source_master_rows(status_rows, target_rows, existing_source_rows=existing_source_rows)
 
     written = {
         "来源主表": workbook.overwrite_sheet_dicts("sources", dynamic_source_headers(target_rows), source_rows),

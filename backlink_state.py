@@ -18,6 +18,7 @@ from legacy_feishu_history import (
 
 DEFAULT_DAILY_SUCCESS_GOAL = 10
 DEFAULT_COOLDOWN_DAYS = 30
+DEFAULT_IN_PROGRESS_TIMEOUT_MINUTES = 15
 DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
 LEGACY_SITE_KEY_ALIASES = {
     "b": "bearclicker.net",
@@ -84,6 +85,24 @@ SOURCE_MASTER_BASE_HEADERS = [
     "下次可推进时间",
     "最后失败原因",
     "最后更新时间",
+    "初始链接格式",
+    "最终链接格式",
+    "格式检测阶段",
+    "格式检测证据",
+    "格式检测置信度",
+    "是否视觉复核",
+    "是否需要登录",
+    "登录探测证据",
+    "是否支持Google登录",
+    "Google登录探测证据",
+    "评论区是否存在",
+    "评论区探测证据",
+    "历史外链验证结果",
+    "历史外链验证证据",
+    "历史审计时间",
+    "历史审计状态",
+    "格式检测时间",
+    "格式检测状态",
 ]
 
 LEGACY_HISTORY_HEADERS = [
@@ -288,14 +307,14 @@ def build_target_site_rows(
         by_key[row_key] = {
             "站点标识": current.get("站点标识", site_key),
             "目标网站": current.get("目标网站", target_url),
-            "默认锚文本": current.get("默认锚文本", str(target.get("anchor_text", "") or "")),
-            "网站说明": current.get("网站说明", str(target.get("description", "") or "")),
-            "联系邮箱": current.get("联系邮箱", str(target.get("email", "") or "")),
-            "优先级": current.get("优先级", str(len(by_key))),
-            "冷却天数": current.get("冷却天数", str(DEFAULT_COOLDOWN_DAYS)),
-            "每日成功目标": current.get("每日成功目标", str(DEFAULT_DAILY_SUCCESS_GOAL)),
-            "是否启用": current.get("是否启用", "是" if target.get("active") else "否"),
-            "创建时间": current.get("创建时间", created_time),
+            "默认锚文本": current.get("默认锚文本") or str(target.get("anchor_text", "") or ""),
+            "网站说明": current.get("网站说明") or str(target.get("description", "") or ""),
+            "联系邮箱": current.get("联系邮箱") or str(target.get("email", "") or ""),
+            "优先级": current.get("优先级") or str(len(by_key)),
+            "冷却天数": current.get("冷却天数") or str(DEFAULT_COOLDOWN_DAYS),
+            "每日成功目标": current.get("每日成功目标") or str(DEFAULT_DAILY_SUCCESS_GOAL),
+            "是否启用": current.get("是否启用") or ("是" if target.get("active") else "否"),
+            "创建时间": current.get("创建时间") or created_time,
         }
 
     for domain, site_key in sorted(reverse_map.items(), key=lambda item: item[1]):
@@ -584,8 +603,11 @@ def reconcile_status_rows(
 
             status = normalize_status_label(row["状态"])
             if status == STATUS_IN_PROGRESS:
+                last_activity = parse_dt(row.get("最后更新时间", "")) or parse_dt(row.get("最后尝试时间", ""))
                 attempt_day = iso_date(row.get("最后尝试时间", ""))
-                if attempt_day and attempt_day != current_time.strftime("%Y-%m-%d"):
+                if last_activity and current_time - last_activity >= timedelta(minutes=DEFAULT_IN_PROGRESS_TIMEOUT_MINUTES):
+                    status = STATUS_PENDING_RETRY
+                elif attempt_day and attempt_day != current_time.strftime("%Y-%m-%d"):
                     status = STATUS_PENDING_RETRY
 
             if has_success_fact:
@@ -622,10 +644,19 @@ def reconcile_status_rows(
     return rows
 
 
-def build_source_master_rows(status_rows: list[dict], target_rows: list[dict]) -> list[dict]:
+def build_source_master_rows(
+    status_rows: list[dict],
+    target_rows: list[dict],
+    existing_source_rows: Optional[list[dict]] = None,
+) -> list[dict]:
     grouped = defaultdict(list)
     target_by_key = {str(row.get("站点标识", "")): row for row in sorted_target_rows(target_rows)}
     ordered_targets = sorted_target_rows(target_rows)
+    existing_by_url = {}
+    for row in existing_source_rows or []:
+        normalized_url = normalize_source_url(extract_cell_url(row.get("来源链接", "")) or extract_cell_text(row.get("来源链接", "")))
+        if normalized_url:
+            existing_by_url[normalized_url] = row
     for row in status_rows:
         grouped[row["来源链接"]].append(row)
 
@@ -655,6 +686,7 @@ def build_source_master_rows(status_rows: list[dict], target_rows: list[dict]) -
                 all_done = False
 
         anchor_row = rows[0]
+        existing_probe = existing_by_url.get(source_url, {})
         summary = {
             "来源标题": anchor_row.get("来源标题", ""),
             "来源链接": source_url,
@@ -668,6 +700,24 @@ def build_source_master_rows(status_rows: list[dict], target_rows: list[dict]) -
             "下次可推进时间": next_progress_at,
             "最后失败原因": latest_failure_reason,
             "最后更新时间": latest_update,
+            "初始链接格式": str(extract_cell_text(existing_probe.get("初始链接格式", "")) or ""),
+            "最终链接格式": str(extract_cell_text(existing_probe.get("最终链接格式", "")) or ""),
+            "格式检测阶段": str(extract_cell_text(existing_probe.get("格式检测阶段", "")) or ""),
+            "格式检测证据": str(extract_cell_text(existing_probe.get("格式检测证据", "")) or ""),
+            "格式检测置信度": str(extract_cell_text(existing_probe.get("格式检测置信度", "")) or ""),
+            "是否视觉复核": str(extract_cell_text(existing_probe.get("是否视觉复核", "")) or ""),
+            "是否需要登录": str(extract_cell_text(existing_probe.get("是否需要登录", "")) or ""),
+            "登录探测证据": str(extract_cell_text(existing_probe.get("登录探测证据", "")) or ""),
+            "是否支持Google登录": str(extract_cell_text(existing_probe.get("是否支持Google登录", "")) or ""),
+            "Google登录探测证据": str(extract_cell_text(existing_probe.get("Google登录探测证据", "")) or ""),
+            "评论区是否存在": str(extract_cell_text(existing_probe.get("评论区是否存在", "")) or ""),
+            "评论区探测证据": str(extract_cell_text(existing_probe.get("评论区探测证据", "")) or ""),
+            "历史外链验证结果": str(extract_cell_text(existing_probe.get("历史外链验证结果", "")) or ""),
+            "历史外链验证证据": str(extract_cell_text(existing_probe.get("历史外链验证证据", "")) or ""),
+            "历史审计时间": str(extract_cell_text(existing_probe.get("历史审计时间", "")) or ""),
+            "历史审计状态": str(extract_cell_text(existing_probe.get("历史审计状态", "")) or ""),
+            "格式检测时间": str(extract_cell_text(existing_probe.get("格式检测时间", "")) or ""),
+            "格式检测状态": str(extract_cell_text(existing_probe.get("格式检测状态", "")) or ""),
         }
         for target in ordered_targets:
             site_key = str(target.get("站点标识", "") or "")
@@ -773,7 +823,7 @@ def _sort_time_key(row: dict) -> tuple:
 
 def _candidate_sort_key(row: dict) -> tuple:
     return (
-        0 if row["状态"] == STATUS_PENDING_RETRY else 1,
+        0 if row["状态"] == STATUS_NOT_STARTED else 1,
         -_safe_float(row.get("页面评分", 0)),
         row.get("根域名", ""),
         row.get("来源链接", ""),

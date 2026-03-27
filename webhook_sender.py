@@ -10,6 +10,64 @@ class WebhookSender:
         """初始化 Webhook 发送器"""
         self.webhook_url = webhook_url
 
+    def send_summary_report(self, title: str, summary: dict) -> bool:
+        """发送精简汇总消息卡片，只保留站点级别结果。"""
+        try:
+            site_rows = summary.get("sites", [])
+            stop_reason = str(summary.get("stop_reason", "") or "")
+            total_success = int(summary.get("total_success", 0) or 0)
+            total_failed = int(summary.get("total_failed", 0) or 0)
+
+            md_lines = [
+                f"**总新增成功**: {total_success}",
+                f"**总失败尝试**: {total_failed}",
+            ]
+            if stop_reason:
+                md_lines.append(f"**结束原因**: {stop_reason}")
+            md_lines.append("")
+
+            if site_rows:
+                md_lines.append("**站点汇总：**")
+                for item in site_rows:
+                    site_key = str(item.get("site_key", "") or "")
+                    today_success = int(item.get("today_success", 0) or 0)
+                    daily_goal = int(item.get("daily_goal", 0) or 0)
+                    run_success = int(item.get("run_success", 0) or 0)
+                    run_failed = int(item.get("run_failed", 0) or 0)
+                    md_lines.append(
+                        f"- **{site_key}**: 今日累计成功 {today_success}/{daily_goal}，本轮新增成功 {run_success}，本轮失败 {run_failed}"
+                    )
+            else:
+                md_lines.append("今日无站点执行结果。")
+
+            content_md = "\n".join(md_lines)
+            card = {
+                "config": {"wide_screen_mode": True},
+                "header": {
+                    "title": {"tag": "plain_text", "content": title},
+                    "template": "blue",
+                },
+                "elements": [
+                    {
+                        "tag": "markdown",
+                        "content": content_md,
+                    },
+                    {"tag": "hr"},
+                    {
+                        "tag": "markdown",
+                        "content": "详细任务记录请直接查看飞书表格。",
+                    },
+                ],
+            }
+            payload = {
+                "msg_type": "interactive",
+                "card": card,
+            }
+            return self._send_payload(payload)
+        except Exception as e:
+            logger.error(f"发送汇总消息异常: {str(e)}")
+            return False
+
     def send_detailed_report(self, title: str, summary: dict) -> bool:
         """发送详细消息卡片"""
         try:

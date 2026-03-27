@@ -48,6 +48,22 @@ class FeishuIntegrationTests(unittest.TestCase):
         self.assertEqual(row_index, 7)
         client.write_range.assert_called_once_with("sheet_id!A7:T7", [row])
 
+    def test_overwrite_sheet_rows_reads_only_first_column_for_existing_row_count(self):
+        client = FeishuClient("app", "secret", "sheet", "sheet_id")
+        client.read_range = Mock(return_value=[["header"], ["row-1"], ["row-2"]])
+        client.write_range = Mock()
+
+        client.overwrite_sheet_rows("sheet_xyz", ["col1", "col2"], [["a", "b"]])
+
+        client.read_range.assert_called_once_with("sheet_xyz!A1:A50000")
+        self.assertEqual(
+            client.write_range.call_args_list,
+            [
+                unittest.mock.call("sheet_xyz!A1:B2", [["col1", "col2"], ["a", "b"]]),
+                unittest.mock.call("sheet_xyz!A3:B3", [["", ""]]),
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

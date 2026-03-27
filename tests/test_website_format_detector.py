@@ -176,6 +176,181 @@ class WebsiteFormatDetectorTests(unittest.TestCase):
         self.assertEqual(result["evidence_type"], "skip_non_article_page")
         mock_get.assert_not_called()
 
+    @patch("website_format_detector.requests.Session.get")
+    def test_detects_html_for_blogger_comment_system(self, mock_get):
+        mock_get.return_value = Mock(
+            status_code=200,
+            text="""
+            <html>
+              <head><title>Blogger Comments</title></head>
+              <body>
+                <article>Post body</article>
+                <iframe src="https://www.blogger.com/comment/frame/123"></iframe>
+                <footer>Powered by Blogger</footer>
+              </body>
+            </html>
+            """,
+            raise_for_status=Mock(),
+        )
+
+        result = WebsiteFormatDetector().analyze_website(
+            "https://example.com/entry-with-blogger-comments"
+        )
+
+        self.assertEqual(result["recommended_format"], "html")
+        self.assertEqual(result["evidence_type"], "blogger_comment_system")
+
+    def test_analyze_page_capability_marks_conflict_for_autolink_upgraded_to_html(self):
+        detector = WebsiteFormatDetector()
+        page = Mock()
+
+        with patch.object(
+            detector,
+            "analyze_website",
+            return_value={
+                "recommended_format": "plain_text_autolink",
+                "evidence_type": "historical_autolink",
+                "confidence": 0.92,
+            },
+        ), patch.object(
+            detector,
+            "_prepare_probe_page",
+            return_value=None,
+        ), patch.object(
+            detector,
+            "analyze_runtime_page",
+            return_value={
+                "recommended_format": "html",
+                "evidence_type": "runtime_contenteditable",
+                "confidence": 0.9,
+            },
+        ), patch.object(
+            detector,
+            "analyze_vision_page",
+            return_value={
+                "recommended_format": "html",
+                "evidence_type": "vision_format_capability",
+                "confidence": 0.93,
+            },
+        ):
+            result = detector.analyze_page_capability(page, "https://example.com/post")
+
+        self.assertEqual(result["status"], "conflict")
+        self.assertTrue(result["vision_used"])
+        self.assertEqual(result["final_result"]["recommended_format"], "html")
+
+    def test_analyze_page_capability_marks_conflict_when_static_html_runtime_unknown(self):
+        detector = WebsiteFormatDetector()
+        page = Mock()
+
+        with patch.object(
+            detector,
+            "analyze_website",
+            return_value={
+                "recommended_format": "html",
+                "evidence_type": "editor_html",
+                "confidence": 0.5,
+            },
+        ), patch.object(
+            detector,
+            "_prepare_probe_page",
+            return_value=None,
+        ), patch.object(
+            detector,
+            "analyze_runtime_page",
+            return_value={
+                "recommended_format": "unknown",
+                "evidence_type": "runtime_unknown",
+                "confidence": 0.0,
+            },
+        ):
+            result = detector.analyze_page_capability(
+                page,
+                "https://example.com/post",
+                enable_vision=False,
+            )
+
+        self.assertEqual(result["status"], "conflict")
+        self.assertEqual(result["final_result"]["recommended_format"], "html")
+
+    def test_analyze_page_capability_marks_conflict_when_runtime_and_vision_disagree(self):
+        detector = WebsiteFormatDetector()
+        page = Mock()
+
+        with patch.object(
+            detector,
+            "analyze_website",
+            return_value={
+                "recommended_format": "plain_text_autolink",
+                "evidence_type": "historical_autolink",
+                "confidence": 0.92,
+            },
+        ), patch.object(
+            detector,
+            "_prepare_probe_page",
+            return_value=None,
+        ), patch.object(
+            detector,
+            "analyze_runtime_page",
+            return_value={
+                "recommended_format": "html",
+                "evidence_type": "runtime_contenteditable",
+                "confidence": 0.9,
+            },
+        ), patch.object(
+            detector,
+            "analyze_vision_page",
+            return_value={
+                "recommended_format": "plain_text",
+                "evidence_type": "vision_plain_text",
+                "confidence": 0.7,
+            },
+        ):
+            result = detector.analyze_page_capability(page, "https://example.com/post")
+
+        self.assertEqual(result["status"], "conflict")
+        self.assertTrue(result["vision_used"])
+        self.assertEqual(result["final_result"]["recommended_format"], "html")
+
+    def test_analyze_page_capability_ignores_vision_timeout_for_conflict(self):
+        detector = WebsiteFormatDetector()
+        page = Mock()
+
+        with patch.object(
+            detector,
+            "analyze_website",
+            return_value={
+                "recommended_format": "unknown",
+                "evidence_type": "unknown",
+                "confidence": 0.0,
+            },
+        ), patch.object(
+            detector,
+            "_prepare_probe_page",
+            return_value=None,
+        ), patch.object(
+            detector,
+            "analyze_runtime_page",
+            return_value={
+                "recommended_format": "html",
+                "evidence_type": "runtime_blogger_iframe",
+                "confidence": 0.86,
+            },
+        ), patch.object(
+            detector,
+            "analyze_vision_page",
+            return_value={
+                "recommended_format": "unknown",
+                "evidence_type": "vision_api_error",
+                "confidence": 0.0,
+            },
+        ):
+            result = detector.analyze_page_capability(page, "https://example.com/post")
+
+        self.assertEqual(result["status"], "completed")
+        self.assertFalse(result["vision_used"])
+        self.assertFalse(result["conflict"])
+
 
 if __name__ == "__main__":
     unittest.main()
