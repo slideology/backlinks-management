@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from urllib.request import Request, urlopen
 from urllib.parse import urlparse
 
 
-DEFAULT_CDP_URL = "http://127.0.0.1:9222"
+DEFAULT_CDP_URL = "http://127.0.0.1:9666"
 
 
 def normalize_cdp_url(url: str) -> str:
@@ -11,7 +12,7 @@ def normalize_cdp_url(url: str) -> str:
     parsed = urlparse(text)
     scheme = parsed.scheme or "http"
     hostname = parsed.hostname or "127.0.0.1"
-    port = parsed.port or 9222
+    port = parsed.port or 9666
     return f"{scheme}://{hostname}:{port}"
 
 
@@ -40,3 +41,23 @@ def ensure_allowed_cdp_url(cdp_url: str, browser_cfg: dict | None = None) -> str
             f"禁止连接非白名单 CDP 端口：当前={normalized}，仅允许={allowed}"
         )
     return normalized
+
+
+def ensure_cdp_blank_page(cdp_url: str, timeout_seconds: int = 5) -> None:
+    normalized = normalize_cdp_url(cdp_url)
+    parsed = urlparse(normalized)
+    base = f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+    try:
+        with urlopen(f"{base}/json/list", timeout=timeout_seconds) as resp:
+            payload = resp.read().decode("utf-8", errors="ignore")
+        if '"type": "page"' in payload:
+            return
+    except Exception:
+        return
+
+    try:
+        req = Request(f"{base}/json/new?about:blank", method="PUT")
+        with urlopen(req, timeout=timeout_seconds):
+            return
+    except Exception:
+        return

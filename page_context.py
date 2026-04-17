@@ -146,7 +146,7 @@ def detect_language(text: str, html_lang: str = "") -> str:
     return best_code
 
 
-def fetch_page_context(url: str, timeout: int = 12) -> dict:
+def fetch_page_context(url: str, timeout: int = 12, include_comments_summary: bool = False) -> dict:
     fallback_title = urlparse(url).netloc
     context = {
         "url": url,
@@ -181,7 +181,7 @@ def fetch_page_context(url: str, timeout: int = 12) -> dict:
         comments_raw = _extract_comment_candidates(raw_html)
         language_code = detect_language(f"{title} {description} {excerpt}", _extract_html_lang(raw_html))
         comments_summary = ""
-        if comments_raw:
+        if comments_raw and include_comments_summary:
             try:
                 from ai_generator import summarize_comment_discussion
 

@@ -34,7 +34,7 @@ import time
 from typing import Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from agents.base_agent import AgentMessage, BaseAgent
+from agents.base_agent import AgentMessage, BaseAgent, resolve_multi_agent_model
 from agents.scheduler_agent import SchedulerAgent
 from agents.executor_agent import ExecutorAgent
 from agents.analyzer_agent import AnalyzerAgent
@@ -60,7 +60,7 @@ class SupervisorAgent(BaseAgent):
         super().__init__(
             name="SupervisorAgent",
             role_description="总协调器，负责每日发帖任务的全局规划、进度追踪和 Agent 间协调",
-            model="gemini-2.0-flash",
+            model=resolve_multi_agent_model(config_path, "supervisor", "gemini-3.1-pro-preview"),
             config_path=config_path,
         )
         self._dry_run = dry_run

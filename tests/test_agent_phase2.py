@@ -18,7 +18,7 @@ from pathlib import Path
 # 确保项目根目录在 Python 路径中
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from agent_memory import AgentMemory, _extract_domain
+from agent_memory import AgentMemory, _extract_domain, normalize_failure_category
 
 
 class TestExtractDomain(unittest.TestCase):
@@ -174,6 +174,48 @@ class TestAgentMemory(unittest.TestCase):
             self.memory.record_result(url, success=False)
         profile = self.memory.get_site_profile(url)
         self.assertFalse(profile["is_worth_trying"])
+
+    def test_set_cooldown_marks_site_temporarily_unavailable(self):
+        url = "https://cooldown-site.com/post"
+        self.memory.set_cooldown(url, reason="network timeout", hours=6)
+        profile = self.memory.get_site_profile(url)
+        self.assertTrue(profile["in_cooldown"])
+        self.assertNotEqual(profile["cooldown_until"], "")
+
+    def test_temporary_blacklist_marks_site_temporarily_unavailable(self):
+        url = "https://protected-site.com/post"
+        self.memory.mark_temporary_blacklist(url, reason="challenge", hours=6)
+        profile = self.memory.get_site_profile(url)
+        self.assertTrue(profile["temporarily_blacklisted"])
+        self.assertFalse(profile["is_worth_trying"])
+
+    def test_record_failure_persists_recent_failure_category(self):
+        url = "https://vision-fail.com/post"
+        self.memory.record_result(
+            url,
+            success=False,
+            strategy="vision",
+            failure_reason="Vision API 调用失败: timed out",
+            failure_category="vision_unavailable",
+            execution_mode="agent_assisted",
+        )
+        profile = self.memory.get_site_profile(url)
+        self.assertEqual(profile["recent_failure_category"], "vision_unavailable")
+        self.assertEqual(profile["last_execution_mode"], "agent_assisted")
+
+
+class TestFailureNormalization(unittest.TestCase):
+    def test_normalize_timeout_failure(self):
+        self.assertEqual(
+            normalize_failure_category("navigation_timeout", "Page.goto Timeout"),
+            "network_timeout",
+        )
+
+    def test_normalize_challenge_failure(self):
+        self.assertEqual(
+            normalize_failure_category("hard_blocker", "页面存在验证码或 Cloudflare 挑战"),
+            "page_protected",
+        )
 
 
 class TestDispatchToolCall(unittest.TestCase):

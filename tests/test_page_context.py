@@ -60,7 +60,7 @@ class PageContextTests(unittest.TestCase):
             raise_for_status=Mock(),
         )
 
-        context = fetch_page_context("https://example.com/idli-kurma")
+        context = fetch_page_context("https://example.com/idli-kurma", include_comments_summary=True)
 
         self.assertEqual(context["language_code"], "en")
         self.assertEqual(context["title"], "Idli Kurma Recipe")
@@ -70,6 +70,31 @@ class PageContextTests(unittest.TestCase):
             "Readers are discussing the breakfast combo and texture tips.",
         )
         mock_summarize.assert_called_once()
+
+    @patch("page_context.requests.get")
+    @patch("ai_generator.summarize_comment_discussion")
+    def test_fetch_page_context_skips_comment_summary_by_default(self, mock_summarize, mock_get):
+        mock_get.return_value = Mock(
+            status_code=200,
+            text="""
+            <html lang="en">
+              <head><title>Example</title></head>
+              <body>
+                <section id="comments">
+                  <article class="comment">
+                    <div class="comment-body">The texture notes were especially helpful.</div>
+                  </article>
+                </section>
+              </body>
+            </html>
+            """,
+            raise_for_status=Mock(),
+        )
+
+        context = fetch_page_context("https://example.com/idli-kurma")
+
+        self.assertEqual(context["comments_summary"], "")
+        mock_summarize.assert_not_called()
 
 
 if __name__ == "__main__":

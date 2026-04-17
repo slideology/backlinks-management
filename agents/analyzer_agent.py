@@ -21,7 +21,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from agents.base_agent import AgentMessage, BaseAgent
+from agents.base_agent import AgentMessage, BaseAgent, resolve_multi_agent_model
 
 
 class AnalyzerAgent(BaseAgent):
@@ -38,7 +38,7 @@ class AnalyzerAgent(BaseAgent):
         super().__init__(
             name="AnalyzerAgent",
             role_description="数据分析师，负责汇总发帖结果、分析失败规律、生成飞书日报",
-            model="gemini-2.0-flash",
+            model=resolve_multi_agent_model(config_path, "analyzer", "gemini-2.5-pro"),
             config_path=config_path,
         )
         self._memory = None

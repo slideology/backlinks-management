@@ -24,7 +24,7 @@ Agent 记忆模块 - 存储并学习每个站点的历史成功/失败规律
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
@@ -35,6 +35,18 @@ DEFAULT_MEMORY_FILE = "site_profiles.json"
 
 # 一个站点最多记录多少次历史（防止文件无限增大）
 MAX_HISTORY_PER_SITE = 100
+DEFAULT_DOMAIN_COOLDOWN_HOURS = 12
+DEFAULT_TEMP_BLACKLIST_HOURS = 72
+
+
+def _parse_iso_dt(value: str) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except Exception:
+        return None
 
 
 def _extract_domain(url: str) -> str:
@@ -47,6 +59,29 @@ def _extract_domain(url: str) -> str:
         return hostname.lower()
     except Exception:
         return str(url or "")[:60]
+
+
+def normalize_failure_category(diagnostic_category: str = "", reason: str = "") -> str:
+    """
+    将执行层的细碎错误统一收敛为少数治理分类，便于调度止损。
+    """
+    raw_category = str(diagnostic_category or "").strip().lower()
+    raw_reason = str(reason or "").strip().lower()
+    text = f"{raw_category} | {raw_reason}"
+
+    if any(marker in text for marker in ("cloudflare", "captcha", "challenge", "login", "auth", "protected", "登录墙", "验证码")):
+        return "page_protected"
+    if any(marker in text for marker in ("comments are closed", "评论已关闭", "不允许评论", "无评论区", "no comment", "comment_unavailable", "hard_blocker")):
+        return "comment_unavailable"
+    if any(marker in text for marker in ("textarea_not_found", "click_no_effect", "dom_not_found", "editor", "iframe", "没有找到可以点击的提交按钮")):
+        return "editor_complex"
+    if any(marker in text for marker in ("vision", "handshake", "熔断", "vision_api_error", "vision_temporarily_paused")):
+        return "vision_unavailable"
+    if any(marker in text for marker in ("post_verify_failed", "submit_unconfirmed", "未出现明确成功信号", "post_unverified")):
+        return "post_unverified"
+    if any(marker in text for marker in ("timeout", "err_name_not_resolved", "err_connection_refused", "net::err", "network", "连接")):
+        return "network_timeout"
+    return "other_failure"
 
 
 class AgentMemory:
@@ -103,6 +138,14 @@ class AgentMemory:
                 "blacklist_reason": "",
                 "last_updated": "",
                 "consecutive_failures": 0,        # 连续失败次数（过高则自动暂缓）
+                "temporary_blacklisted_until": "",
+                "temporary_blacklist_reason": "",
+                "cooldown_until": "",
+                "cooldown_reason": "",
+                "recent_failure_category": "",
+                "recent_failure_reason": "",
+                "last_execution_mode": "",
+                "last_strategy": "dom",
             }
         return self._profiles[domain]
 
@@ -117,6 +160,8 @@ class AgentMemory:
         strategy: str = "dom",
         elapsed_seconds: float = 0.0,
         failure_reason: str = "",
+        failure_category: str = "",
+        execution_mode: str = "",
     ) -> None:
         """
         记录一次发帖结果。
@@ -135,8 +180,16 @@ class AgentMemory:
         if success:
             profile["successes"] = min(profile["successes"] + 1, MAX_HISTORY_PER_SITE)
             profile["consecutive_failures"] = 0
+            profile["recent_failure_category"] = ""
+            profile["recent_failure_reason"] = ""
+            profile["cooldown_until"] = ""
+            profile["cooldown_reason"] = ""
         else:
             profile["consecutive_failures"] = profile.get("consecutive_failures", 0) + 1
+            profile["recent_failure_category"] = failure_category or normalize_failure_category(
+                reason=failure_reason
+            )
+            profile["recent_failure_reason"] = failure_reason or ""
 
         # 更新策略统计
         stats = profile.setdefault("strategy_stats", {})
@@ -154,6 +207,8 @@ class AgentMemory:
                 best_rate = rate
                 best_strategy = s
         profile["best_strategy"] = best_strategy
+        profile["last_strategy"] = strategy or profile.get("last_strategy", "dom")
+        profile["last_execution_mode"] = execution_mode or profile.get("last_execution_mode", "")
 
         # 更新平均耗时（加权平均）
         old_avg = float(profile.get("avg_time_seconds") or 0)
@@ -172,6 +227,52 @@ class AgentMemory:
         profile["last_updated"] = datetime.now().isoformat(timespec="seconds")
         self._save()
         print(f"  🚫 已将 {domain} 标记为黑名单：{reason}")
+
+    def mark_temporary_blacklist(
+        self,
+        url: str,
+        reason: str = "",
+        hours: int = DEFAULT_TEMP_BLACKLIST_HOURS,
+    ) -> None:
+        domain = _extract_domain(url)
+        profile = self._get_or_create(domain)
+        until = datetime.now() + timedelta(hours=max(1, int(hours or DEFAULT_TEMP_BLACKLIST_HOURS)))
+        profile["temporary_blacklisted_until"] = until.isoformat(timespec="seconds")
+        profile["temporary_blacklist_reason"] = reason or "临时黑名单"
+        profile["last_updated"] = datetime.now().isoformat(timespec="seconds")
+        self._save()
+
+    def set_cooldown(
+        self,
+        url: str,
+        reason: str = "",
+        hours: int = DEFAULT_DOMAIN_COOLDOWN_HOURS,
+    ) -> None:
+        domain = _extract_domain(url)
+        profile = self._get_or_create(domain)
+        until = datetime.now() + timedelta(hours=max(1, int(hours or DEFAULT_DOMAIN_COOLDOWN_HOURS)))
+        profile["cooldown_until"] = until.isoformat(timespec="seconds")
+        profile["cooldown_reason"] = reason or "域名冷却"
+        profile["last_updated"] = datetime.now().isoformat(timespec="seconds")
+        self._save()
+
+    def is_in_cooldown(self, url: str, now: Optional[datetime] = None) -> bool:
+        domain = _extract_domain(url)
+        profile = self._profiles.get(domain, {})
+        cooldown_until = _parse_iso_dt(profile.get("cooldown_until", ""))
+        current = now or datetime.now()
+        return bool(cooldown_until and cooldown_until > current)
+
+    def get_cooldown_until(self, url: str) -> str:
+        domain = _extract_domain(url)
+        return str(self._profiles.get(domain, {}).get("cooldown_until", "") or "")
+
+    def is_temporarily_blacklisted(self, url: str, now: Optional[datetime] = None) -> bool:
+        domain = _extract_domain(url)
+        profile = self._profiles.get(domain, {})
+        until = _parse_iso_dt(profile.get("temporary_blacklisted_until", ""))
+        current = now or datetime.now()
+        return bool(until and until > current)
 
     def is_blacklisted(self, url: str) -> bool:
         """判断某个站点是否在黑名单中。"""
@@ -201,8 +302,11 @@ class AgentMemory:
         successes = raw.get("successes", 0)
         raw["domain"] = domain
         raw["success_rate"] = round(successes / attempts, 2) if attempts > 0 else 0.5  # 默认中性
+        raw["in_cooldown"] = self.is_in_cooldown(url)
+        raw["temporarily_blacklisted"] = self.is_temporarily_blacklisted(url)
         raw["is_worth_trying"] = (
             not raw.get("blacklisted", False)
+            and not raw.get("temporarily_blacklisted", False)
             and raw["success_rate"] >= 0.2          # 至少 20% 成功率才值得继续尝试
             and raw.get("consecutive_failures", 0) < 5  # 不能连续失败太多次
         )

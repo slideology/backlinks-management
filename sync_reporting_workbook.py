@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Optional
+from urllib.parse import urlparse
 
 from backlink_state import (
     LEGACY_HISTORY_HEADERS,
@@ -19,6 +20,36 @@ from backlink_state import (
 )
 from feishu_workbook import FeishuWorkbook
 from legacy_feishu_history import LegacyFeishuHistoryStore, load_legacy_history_config
+
+
+def _normalize_excluded_domains(domains: list[str] | tuple[str, ...] | None) -> set[str]:
+    normalized = set()
+    for domain in domains or []:
+        text = str(domain or "").strip().lower()
+        if text:
+            normalized.add(text.lstrip("."))
+    return normalized
+
+
+def _row_matches_excluded_domains(row: dict, excluded_domains: set[str]) -> bool:
+    if not excluded_domains:
+        return False
+    source_url = str(row.get("来源链接", "") or "").strip()
+    if not source_url:
+        return False
+    try:
+        hostname = (urlparse(source_url).hostname or "").strip().lower()
+    except Exception:
+        hostname = ""
+    if not hostname:
+        return False
+    return any(hostname == domain or hostname.endswith(f".{domain}") for domain in excluded_domains)
+
+
+def _filter_rows_by_excluded_domains(rows: list[dict], excluded_domains: set[str]) -> list[dict]:
+    if not excluded_domains:
+        return rows
+    return [row for row in rows if not _row_matches_excluded_domains(row, excluded_domains)]
 
 
 def _read_existing_targets(workbook: FeishuWorkbook) -> list[dict]:
@@ -52,11 +83,12 @@ def _read_existing_status_rows(workbook: FeishuWorkbook) -> tuple[list[dict], li
     return [], []
 
 
-def sync_reporting_workbook(workbook: Optional[FeishuWorkbook] = None):
+def build_reporting_snapshot(workbook: Optional[FeishuWorkbook] = None) -> dict:
     workbook = workbook or FeishuWorkbook.from_config()
     if not workbook:
         raise RuntimeError("飞书未正确配置，无法同步运营总表。")
 
+    excluded_domains = _normalize_excluded_domains(workbook.config.get("excluded_source_domains", []))
     history_store = LegacyFeishuHistoryStore.from_config()
     legacy_config = load_legacy_history_config()
 
@@ -84,23 +116,39 @@ def sync_reporting_workbook(workbook: Optional[FeishuWorkbook] = None):
     )
     source_rows = build_source_master_rows(status_rows, target_rows, existing_source_rows=existing_source_rows)
 
-    written = {
-        "来源主表": workbook.overwrite_sheet_dicts("sources", dynamic_source_headers(target_rows), source_rows),
-        "站点发布状态表": workbook.overwrite_sheet_dicts("records", STATUS_HEADERS, status_rows),
-        "目标站表": workbook.overwrite_sheet_dicts("targets", TARGET_SITE_HEADERS, target_rows),
-        "旧表历史事实表": workbook.overwrite_sheet_dicts("history", LEGACY_HISTORY_HEADERS, history_rows),
-        "旧表全量来源库": workbook.overwrite_sheet_dicts("library", LEGACY_SOURCE_LIBRARY_HEADERS, library_rows),
-    }
+    history_rows = _filter_rows_by_excluded_domains(history_rows, excluded_domains)
+    library_rows = _filter_rows_by_excluded_domains(library_rows, excluded_domains)
+    status_rows = _filter_rows_by_excluded_domains(status_rows, excluded_domains)
+    source_rows = _filter_rows_by_excluded_domains(source_rows, excluded_domains)
 
     return {
         "spreadsheet_token": workbook.spreadsheet_token,
         "spreadsheet_url": workbook.spreadsheet_url,
         "sheet_ids": workbook.sheet_ids,
-        "written": written,
         "targets": target_rows,
         "status_rows": status_rows,
         "source_rows": source_rows,
+        "history_rows": history_rows,
+        "library_rows": library_rows,
     }
+
+
+def sync_reporting_workbook(workbook: Optional[FeishuWorkbook] = None):
+    snapshot = build_reporting_snapshot(workbook=workbook)
+    workbook = workbook or FeishuWorkbook.from_config()
+    if not workbook:
+        raise RuntimeError("飞书未正确配置，无法同步运营总表。")
+
+    written = {
+        "来源主表": workbook.sync_sheet_dicts("sources", dynamic_source_headers(snapshot["targets"]), ["来源链接"], snapshot["source_rows"]),
+        "站点发布状态表": workbook.sync_sheet_dicts("records", STATUS_HEADERS, ["来源链接", "目标站标识"], snapshot["status_rows"]),
+        "目标站表": workbook.sync_sheet_dicts("targets", TARGET_SITE_HEADERS, ["站点标识"], snapshot["targets"]),
+        "旧表历史事实表": workbook.sync_sheet_dicts("history", LEGACY_HISTORY_HEADERS, ["来源链接", "目标站标识"], snapshot["history_rows"]),
+        "旧表全量来源库": workbook.sync_sheet_dicts("library", LEGACY_SOURCE_LIBRARY_HEADERS, ["来源链接"], snapshot["library_rows"]),
+    }
+
+    snapshot["written"] = written
+    return snapshot
 
 
 def main():

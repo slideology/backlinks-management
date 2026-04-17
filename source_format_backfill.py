@@ -10,7 +10,7 @@ from typing import Optional
 from playwright.sync_api import sync_playwright
 
 from backlink_state import TARGET_SITE_HEADERS, dynamic_source_headers
-from browser_cdp import DEFAULT_CDP_URL, ensure_allowed_cdp_url, merge_browser_config
+from browser_cdp import DEFAULT_CDP_URL, ensure_allowed_cdp_url, ensure_cdp_blank_page, merge_browser_config
 from feishu_workbook import FeishuWorkbook
 from legacy_feishu_history import extract_cell_text, extract_cell_url, normalize_source_url
 from website_format_detector import WebsiteFormatDetector
@@ -84,9 +84,18 @@ def read_source_rows_paged(
 
 
 def open_probe_browser(playwright_manager, cdp_url: str):
+    ensure_cdp_blank_page(cdp_url)
     browser_app = playwright_manager.chromium.connect_over_cdp(cdp_url)
     context = browser_app.contexts[0]
-    page = context.new_page()
+    pages = list(getattr(context, "pages", []) or [])
+    if pages:
+        page = pages[0]
+        try:
+            page.goto("about:blank", wait_until="domcontentloaded", timeout=5000)
+        except Exception:
+            pass
+    else:
+        page = context.new_page()
     return browser_app, context, page, True
 
 

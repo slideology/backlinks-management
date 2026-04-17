@@ -21,8 +21,20 @@ from datetime import datetime
 from typing import Any, Optional
 
 from dotenv import load_dotenv
+from gemini_key_manager import get_active_key
 
 load_dotenv()
+
+
+def resolve_multi_agent_model(config_path: str, agent_key: str, default_model: str) -> str:
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        models = config.get("multi_agent", {}).get("models", {}) or {}
+        model = str(models.get(agent_key, "") or "").strip()
+        return model or default_model
+    except Exception:
+        return default_model
 
 # =====================================================================
 # Agent 间消息格式
@@ -115,7 +127,7 @@ class BaseAgent:
             from google import genai
             from google.genai import types
 
-            api_key = os.environ.get("GEMINI_API_KEY")
+            api_key = get_active_key()
             if not api_key:
                 raise ValueError("GEMINI_API_KEY 未配置！")
             self._gemini_client = genai.Client(

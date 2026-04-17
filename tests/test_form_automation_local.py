@@ -5,9 +5,11 @@ from browser_cdp import ensure_allowed_cdp_url, merge_browser_config
 from form_automation_local import (
     DEFAULT_CONTACT_EMAIL,
     _build_task_failure_updates,
+    _detect_hard_blocker,
     _frame_scan_priority,
     _is_blogger_comment_url,
     _is_irrelevant_frame_url,
+    _preprobe_page_for_generation,
     _is_submission_context_reset_error,
     _page_has_comment_signals,
     _target_presence_tokens,
@@ -18,6 +20,76 @@ from form_automation_local import (
 
 
 class FormAutomationLocalTests(unittest.TestCase):
+    @patch("form_automation_local._deep_scroll_to_bottom")
+    @patch("form_automation_local.try_dismiss_overlays")
+    @patch("form_automation_local._fast_navigate_for_commenting", return_value={"partial_navigation": False, "navigation_warning": ""})
+    def test_preprobe_page_for_generation_stops_on_hard_blocker(
+        self,
+        _mock_nav,
+        _mock_dismiss,
+        _mock_scroll,
+    ):
+        class FakeLocator:
+            def all_inner_texts(self):
+                return ["Please verify you are human before continuing."]
+
+        class FakePage:
+            frames = []
+
+            def locator(self, selector):
+                if selector == "body":
+                    return FakeLocator()
+                raise AssertionError(f"unexpected selector: {selector}")
+
+        meta = _preprobe_page_for_generation(
+            FakePage(),
+            "https://example.com/post",
+            15000,
+            "classic_dom",
+            "dom",
+        )
+
+        self.assertFalse(meta["ok"])
+        self.assertEqual(meta["diagnostic_category"], "hard_blocker")
+
+    @patch("form_automation_local._deep_scroll_to_bottom")
+    @patch("form_automation_local.try_dismiss_overlays")
+    @patch("form_automation_local._fast_navigate_for_commenting", return_value={"partial_navigation": False, "navigation_warning": ""})
+    def test_preprobe_page_for_generation_stops_when_comment_signal_missing(
+        self,
+        _mock_nav,
+        _mock_dismiss,
+        _mock_scroll,
+    ):
+        class FakeLocator:
+            def __init__(self, texts=None):
+                self._texts = texts or [""]
+
+            def count(self):
+                return 0
+
+            def all_inner_texts(self):
+                return self._texts
+
+        class FakePage:
+            frames = []
+
+            def locator(self, selector):
+                if selector == "body":
+                    return FakeLocator(["plain body without discussion"])
+                return FakeLocator()
+
+        meta = _preprobe_page_for_generation(
+            FakePage(),
+            "https://example.com/post",
+            15000,
+            "classic_dom",
+            "dom",
+        )
+
+        self.assertFalse(meta["ok"])
+        self.assertEqual(meta["diagnostic_category"], "comment_signal_missing")
+
     def test_should_use_vision_when_dom_never_found_comment_box(self):
         self.assertTrue(_should_use_vision_fallback("Layer 1: 主页面及所有嵌套 iframe 中均未找到任何评论输入框"))
 
@@ -47,6 +119,9 @@ class FormAutomationLocalTests(unittest.TestCase):
         self.assertEqual(updates["目标站标识"], "bearclicker.net")
         self.assertEqual(updates["状态"], "待重试")
         self.assertEqual(updates["最近失败原因"], "运行时异常")
+        self.assertEqual(updates["执行模式"], "classic_dom")
+        self.assertEqual(updates["推荐策略"], "dom")
+        self.assertEqual(updates["最近失败分类"], "other_failure")
 
     def test_is_blogger_comment_url_matches_blogger_frame(self):
         self.assertTrue(_is_blogger_comment_url("https://www.blogger.com/comment/frame/123"))
@@ -128,6 +203,58 @@ class FormAutomationLocalTests(unittest.TestCase):
         ok, reason = _page_has_comment_signals(FakePage())
         self.assertFalse(ok)
         self.assertIn("评论已关闭", reason)
+
+    def test_page_has_comment_signals_matches_comment_iframe(self):
+        class FakeLocator:
+            def __init__(self, count_value=0, texts=None):
+                self._count_value = count_value
+                self._texts = texts or []
+
+            def count(self):
+                return self._count_value
+
+            def all_inner_texts(self):
+                return self._texts
+
+        class FakeFrame:
+            def __init__(self, url):
+                self.url = url
+
+        class FakePage:
+            frames = [FakeFrame("https://comments.example.com/embed/reply")]
+
+            def locator(self, selector):
+                if selector == "body":
+                    return FakeLocator(texts=[""])
+                return FakeLocator()
+
+        ok, reason = _page_has_comment_signals(FakePage())
+        self.assertTrue(ok)
+        self.assertIn("iframe", reason)
+
+    def test_detect_hard_blocker_matches_cloudflare_challenge_frame(self):
+        class FakeLocator:
+            def __init__(self, texts=None):
+                self._texts = texts or [""]
+
+            def all_inner_texts(self):
+                return self._texts
+
+        class FakeFrame:
+            def __init__(self, url):
+                self.url = url
+
+        class FakePage:
+            frames = [FakeFrame("https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/orchestrate")]
+
+            def locator(self, selector):
+                if selector == "body":
+                    return FakeLocator()
+                raise AssertionError(f"unexpected selector: {selector}")
+
+        blocked, reason = _detect_hard_blocker(FakePage())
+        self.assertTrue(blocked)
+        self.assertIn("Cloudflare", reason)
 
     @patch("form_automation_local._detect_submission_side_effect", return_value="提交后页面中已看不到原评论输入框")
     def test_verify_post_success_accepts_submission_side_effect(self, mock_side_effect):
@@ -238,17 +365,17 @@ class FormAutomationLocalTests(unittest.TestCase):
     def test_default_contact_email_constant_is_available(self):
         self.assertEqual(DEFAULT_CONTACT_EMAIL, "slideology0816@gmail.com")
 
-    def test_browser_policy_defaults_to_9222_and_no_front(self):
+    def test_browser_policy_defaults_to_9666_and_no_front(self):
         browser_cfg = merge_browser_config({})
-        self.assertEqual(browser_cfg["connect_cdp_url"], "http://127.0.0.1:9222")
-        self.assertEqual(browser_cfg["allow_only_cdp_url"], "http://127.0.0.1:9222")
+        self.assertEqual(browser_cfg["connect_cdp_url"], "http://127.0.0.1:9666")
+        self.assertEqual(browser_cfg["allow_only_cdp_url"], "http://127.0.0.1:9666")
         self.assertFalse(browser_cfg["bring_to_front"])
         self.assertTrue(browser_cfg["require_cdp"])
 
     def test_browser_policy_rejects_non_whitelisted_cdp_url(self):
-        browser_cfg = merge_browser_config({"allow_only_cdp_url": "http://127.0.0.1:9222"})
+        browser_cfg = merge_browser_config({"allow_only_cdp_url": "http://127.0.0.1:9666"})
         with self.assertRaises(RuntimeError):
-            ensure_allowed_cdp_url("http://127.0.0.1:9333", browser_cfg)
+            ensure_allowed_cdp_url("http://127.0.0.1:9222", browser_cfg)
 
 
 if __name__ == "__main__":

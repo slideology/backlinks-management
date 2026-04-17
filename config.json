@@ -1,126 +1,152 @@
 {
-    "webhook": {
-        "url": "https://open.feishu.cn/open-apis/bot/v2/hook/0bde20e9-1cc2-4046-b99e-91cd5d219351"
-    },
+  "webhook": {
+    "url": "https://open.feishu.cn/open-apis/bot/v2/hook/0bde20e9-1cc2-4046-b99e-91cd5d219351"
+  },
   "scheduler": {
     "daily_limit": 20,
-        "priority_order": [
-            "high",
-            "medium",
-            "low"
-        ],
-        "retry_after_days": 3,
-        "success_buffer_multiplier": 3,
-        "max_task_pool": 40,
+    "priority_order": [
+      "high",
+      "medium",
+      "low"
+    ],
+    "retry_after_days": 3,
+    "success_buffer_multiplier": 3,
+    "max_task_pool": 40,
     "max_rounds_per_day": 0,
     "max_idle_rounds_per_day": 0
   },
-    "execution": {
-        "success_goal": 10,
-        "page_load_timeout_ms": 15000,
-        "max_retries": 1,
-        "enable_sso": false
-    },
-    "browser": {
-        "connect_cdp_url": "http://127.0.0.1:9222",
-        "allow_only_cdp_url": "http://127.0.0.1:9222",
-        "bring_to_front": false,
-        "require_cdp": true
-    },
-    "vision": {
-        "enabled": true,
-        "debug_dir": "artifacts/vision",
-        "request_timeout_seconds": 18,
-        "retry_attempts": 1,
-        "retry_backoff_seconds": 2,
-        "image_type": "jpeg",
-        "image_quality": 65,
-        "max_image_side": 1400,
-        "circuit_breaker_failures": 2,
-        "circuit_breaker_cooldown_seconds": 600
-    },
-    "format_probe": {
-        "state_file": "artifacts/format_probe/state.json",
-        "summary_file": "artifacts/format_probe/summary.json",
-        "confidence_threshold": 0.8,
-        "enable_vision": true,
-        "page_load_timeout_ms": 20000,
-        "read_page_size": 250,
-        "write_retry_count": 5,
-        "write_retry_base_seconds": 2
-    },
-    "legacy_history": {
-        "enabled": true,
-        "spreadsheet_token": "DhMBsqDNKh0dI4trm5Rc3tJEnyb",
-        "skip_sheet_titles": [
-            "汇总",
-            "Sheet54"
-        ],
-        "cache_file": "artifacts/legacy_history/cache.json",
-        "cache_ttl_hours": 12,
-        "min_page_ascore": 10,
-        "report_dir": "artifacts/legacy_history/reports",
-        "promoted_site_map": {
-            "bearclicker.net": "bearclicker.net",
-            "www.bearclicker.net": "bearclicker.net",
-            "nanobananaimage.org": "nanobananaimage.org",
-            "www.nanobananaimage.org": "nanobananaimage.org",
-            "nanobananaimage.com": "nanobananaimage.org",
-            "www.nanobananaimage.com": "nanobananaimage.org"
-        }
-    },
-    "reporting_workbook": {
-        "enabled": true,
-        "workbook_title": "外链运营总表",
-        "state_file": "artifacts/reporting_workbook/state.json",
-        "sheet_titles": {
-            "sources": "来源总表",
-            "records": "发布记录表",
-            "targets": "目标站表",
-            "history": "历史去重表",
-            "library": "旧表全量来源库"
-        }
-    },
-    "feishu": {
-        "enabled": true,
-        "app_id": "cli_a9395d5703789bcd",
-        "app_secret": "RCKcGuNO9xdhOU3qXs4kigzVcMCwG5rI",
-        "spreadsheet_token": "QVNpsPYeyhii9dt1txJcWOxhnQ2",
-        "sheet_id": "738d2a",
-        "auth_mode": "user",
-        "redirect_uri": "http://127.0.0.1:8787/callback",
-        "user_token_file": ".feishu_user_token.json",
-        "timeout_seconds": 20,
-        "request_retries": 3,
-        "request_backoff_seconds": 2
-    },
-    "strategy_decider": {
-        "enabled": true,
-        "model": "gemini-2.0-flash",
-        "request_timeout_seconds": 15,
-        "debug_dir": "artifacts/strategy_decider",
-        "confidence_threshold": 0.6,
-        "rule_based_fallback": true
-    },
-    "agent": {
-        "enabled": false,
-        "model": "gemini-2.5-flash",
-        "max_agent_rounds": 20,
-        "request_timeout_seconds": 30,
-        "dry_run": false,
-        "agent_log_dir": "artifacts/agent_logs"
-    },
-    "multi_agent": {
-        "enabled": false,
-        "dry_run": false,
-        "max_rounds": 10,
-        "max_idle_rounds": 3,
-        "tasks_per_round": 5,
-        "models": {
-            "supervisor": "gemini-2.0-flash",
-            "scheduler": "gemini-2.0-flash",
-            "executor": "gemini-2.0-flash",
-            "analyzer": "gemini-2.0-flash"
-        }
+  "execution": {
+    "success_goal": 10,
+    "page_load_timeout_ms": 15000,
+    "max_retries": 1,
+    "enable_sso": false
+  },
+  "agent_assist": {
+    "enabled": true,
+    "failure_threshold": 2,
+    "same_link_daily_limit": 1,
+    "same_domain_daily_limit": 1,
+    "domain_cooldown_hours": 12,
+    "temporary_blacklist_hours": 72
+  },
+  "ai_generation": {
+    "preprobe_before_generation": true,
+    "generate_comment_summary": false,
+    "generate_chinese_translation": false,
+    "request_timeout_seconds": 20,
+    "retry_attempts": 3,
+    "retry_backoff_seconds": 2,
+    "model": "gemini-3-flash-preview",
+    "fallback_model": "gemini-flash-lite-latest"
+  },
+  "browser": {
+    "connect_cdp_url": "http://127.0.0.1:9666",
+    "allow_only_cdp_url": "http://127.0.0.1:9666",
+    "bring_to_front": false,
+    "require_cdp": true
+  },
+  "vision": {
+    "enabled": true,
+    "debug_dir": "artifacts/vision",
+    "model": "gemini-3-flash-preview",
+    "fallback_model": "gemini-2.5-flash",
+    "request_timeout_seconds": 30,
+    "retry_attempts": 2,
+    "retry_backoff_seconds": 2,
+    "image_type": "jpeg",
+    "image_quality": 65,
+    "max_image_side": 1400,
+    "circuit_breaker_failures": 3,
+    "circuit_breaker_cooldown_seconds": 600
+  },
+  "format_probe": {
+    "state_file": "artifacts/format_probe/state.json",
+    "summary_file": "artifacts/format_probe/summary.json",
+    "confidence_threshold": 0.8,
+    "enable_vision": true,
+    "page_load_timeout_ms": 20000,
+    "read_page_size": 250,
+    "write_retry_count": 5,
+    "write_retry_base_seconds": 2
+  },
+  "legacy_history": {
+    "enabled": true,
+    "spreadsheet_token": "DhMBsqDNKh0dI4trm5Rc3tJEnyb",
+    "skip_sheet_titles": [
+      "汇总",
+      "Sheet54"
+    ],
+    "cache_file": "artifacts/legacy_history/cache.json",
+    "cache_ttl_hours": 12,
+    "min_page_ascore": 10,
+    "report_dir": "artifacts/legacy_history/reports",
+    "promoted_site_map": {
+      "bearclicker.net": "bearclicker.net",
+      "www.bearclicker.net": "bearclicker.net",
+      "nanobananaimage.org": "nanobananaimage.org",
+      "www.nanobananaimage.org": "nanobananaimage.org",
+      "nanobananaimage.com": "nanobananaimage.org",
+      "www.nanobananaimage.com": "nanobananaimage.org"
     }
+  },
+  "reporting_workbook": {
+    "enabled": true,
+    "workbook_title": "外链运营总表",
+    "state_file": "artifacts/reporting_workbook/state.json",
+    "excluded_source_domains": [
+      "search.yahoo.com"
+    ],
+    "sheet_titles": {
+      "sources": "来源总表",
+      "records": "发布记录表",
+      "targets": "目标站表",
+      "history": "历史去重表",
+      "library": "旧表全量来源库"
+    }
+  },
+  "feishu": {
+    "enabled": true,
+    "app_id": "cli_a9395d5703789bcd",
+    "app_secret": "RCKcGuNO9xdhOU3qXs4kigzVcMCwG5rI",
+    "spreadsheet_token": "JaL2sOUGBhKI2ytFL17chrjqngb",
+    "sheet_id": "ca831c",
+    "auth_mode": "user",
+    "redirect_uri": "http://127.0.0.1:8787/callback",
+    "user_token_file": ".feishu_user_token.json",
+    "timeout_seconds": 20,
+    "request_retries": 3,
+    "request_backoff_seconds": 2
+  },
+  "strategy_decider": {
+    "enabled": true,
+    "model": "gemini-flash-lite-latest",
+    "request_timeout_seconds": 15,
+    "debug_dir": "artifacts/strategy_decider",
+    "confidence_threshold": 0.6,
+    "rule_based_fallback": true
+  },
+  "agent": {
+    "enabled": false,
+    "model": "gemini-3.1-pro-preview",
+    "fallback_model": "gemini-3-flash-preview",
+    "max_agent_rounds": 20,
+    "request_timeout_seconds": 60,
+    "retry_attempts": 2,
+    "retry_backoff_seconds": 2,
+    "dry_run": false,
+    "agent_log_dir": "artifacts/agent_logs"
+  },
+  "multi_agent": {
+    "enabled": false,
+    "dry_run": false,
+    "max_rounds": 10,
+    "max_idle_rounds": 3,
+    "tasks_per_round": 5,
+    "models": {
+      "supervisor": "gemini-3.1-pro-preview",
+      "scheduler": "gemini-flash-lite-latest",
+      "executor": "gemini-flash-lite-latest",
+      "analyzer": "gemini-2.5-pro"
+    }
+  }
 }

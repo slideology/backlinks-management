@@ -409,6 +409,29 @@ class FeishuClient:
             as_user=as_user,
         )
 
+    def resize_sheet(
+        self,
+        sheet_id: str,
+        row_count: int,
+        column_count: int,
+        spreadsheet_token: Optional[str] = None,
+        as_user: Optional[bool] = None,
+        frozen_row_count: Optional[int] = 1,
+    ) -> None:
+        actual_token = spreadsheet_token or self.spreadsheet_token
+        properties = {
+            "sheetId": sheet_id,
+            "rowCount": max(1, int(row_count)),
+            "columnCount": max(1, int(column_count)),
+        }
+        if frozen_row_count is not None:
+            properties["frozenRowCount"] = max(0, int(frozen_row_count))
+        self.batch_update_sheets(
+            [{"updateSheet": {"properties": properties}}],
+            spreadsheet_token=actual_token,
+            as_user=as_user,
+        )
+
     def attach_spreadsheet(self, spreadsheet_token: str, sheet_id: str) -> None:
         self.spreadsheet_token = spreadsheet_token
         self.sheet_id = sheet_id

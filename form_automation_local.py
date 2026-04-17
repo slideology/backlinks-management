@@ -9,7 +9,9 @@ from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright, Page, Frame
 
-from browser_cdp import DEFAULT_CDP_URL, ensure_allowed_cdp_url, merge_browser_config
+from agent_memory import AgentMemory, normalize_failure_category
+from browser_cdp import DEFAULT_CDP_URL, ensure_allowed_cdp_url, ensure_cdp_blank_page, merge_browser_config
+from backlink_state import EXECUTION_MODE_AGENT, EXECUTION_MODE_CLASSIC
 from legacy_feishu_history import extract_cell_text, extract_cell_url, normalize_source_url
 
 DEFAULT_CONTACT_EMAIL = "slideology0816@gmail.com"
@@ -39,17 +41,81 @@ FAST_BLOCKED_URL_PATTERNS = (
 COMMENT_SIGNAL_SELECTORS = (
     "textarea",
     '[contenteditable="true"]',
+    '[role="textbox"]',
+    ".ql-editor",
+    ".ProseMirror",
+    ".fr-element",
+    ".public-DraftEditor-content",
+    ".cke_editable",
     "#comments",
     ".comments",
+    ".comment-list",
+    ".commentlist",
     ".comment-respond",
     "#respond",
     ".comment-form",
     "#commentform",
+    'input[name*="email"]',
+    'input[type="email"]',
+    'input[name*="url"]',
+    'input[name*="website"]',
     'iframe[src*="comment"]',
     'iframe[src*="blogger"]',
     'iframe[src*="disqus"]',
+    'iframe[src*="reply"]',
     'form[id*="comment"]',
     'form[class*="comment"]',
+)
+COMMENT_EDITOR_SELECTORS = (
+    "textarea:visible",
+    '[contenteditable="true"]:visible',
+    '[role="textbox"]:visible',
+    '.ql-editor:visible',
+    '.ProseMirror:visible',
+    '.fr-element:visible',
+    '.public-DraftEditor-content:visible',
+    '.cke_editable:visible',
+)
+COMMENT_REVEAL_SELECTORS = (
+    'button:has-text("Reply")',
+    'a:has-text("Reply")',
+    'button:has-text("Leave a Reply")',
+    'a:has-text("Leave a Reply")',
+    'button:has-text("Leave a comment")',
+    'a:has-text("Leave a comment")',
+    'button:has-text("Add Comment")',
+    'a:has-text("Add Comment")',
+    'button:has-text("Comment")',
+    'a:has-text("Comment")',
+)
+CHALLENGE_FRAME_MARKERS = (
+    "challenge-platform",
+    "challenges.cloudflare.com",
+    "turnstile",
+    "recaptcha",
+    "hcaptcha",
+)
+CHALLENGE_TEXT_MARKERS = (
+    "verify you are human",
+    "security check",
+    "cloudflare",
+    "captcha",
+    "turnstile",
+    "人机验证",
+    "安全检查",
+)
+COMMENTS_CLOSED_MARKERS = (
+    "comments are closed",
+    "closed for comments",
+    "评论已关闭",
+    "不允许评论",
+)
+LOGIN_REQUIRED_MARKERS = (
+    "log in to comment",
+    "you must be logged in",
+    "sign in to comment",
+    "login to post a comment",
+    "登录后评论",
 )
 IRRELEVANT_FRAME_PATTERNS = (
     "youtube.com",
@@ -99,6 +165,19 @@ def translate_error(error_msg: str) -> str:
 
 def load_runtime_config(config_path="config.json"):
     defaults = {
+        "agent_assist": {
+            "enabled": True,
+            "failure_threshold": 2,
+            "same_link_daily_limit": 1,
+            "same_domain_daily_limit": 1,
+            "domain_cooldown_hours": 12,
+            "temporary_blacklist_hours": 72,
+        },
+        "ai_generation": {
+            "preprobe_before_generation": True,
+            "generate_comment_summary": False,
+            "generate_chinese_translation": False,
+        },
         "execution": {
             "success_goal": 10,
             "page_load_timeout_ms": 30000,
@@ -120,6 +199,8 @@ def load_runtime_config(config_path="config.json"):
         return defaults
 
     merged = {**defaults, **config}
+    merged["agent_assist"] = {**defaults["agent_assist"], **config.get("agent_assist", {})}
+    merged["ai_generation"] = {**defaults["ai_generation"], **config.get("ai_generation", {})}
     merged["execution"] = {**defaults["execution"], **config.get("execution", {})}
     merged["browser"] = merge_browser_config(config.get("browser", {}) or defaults["browser"])
     merged["vision"] = {**defaults["vision"], **config.get("vision", {})}
@@ -137,6 +218,61 @@ def format_notes(message: str, diagnosis: str = "") -> str:
     return message
 
 
+def _format_memory_dt(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return datetime.fromisoformat(text).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return text
+
+
+def _append_agent_trace(meta: dict, step: str) -> None:
+    if not step:
+        return
+    meta.setdefault("action_trace", [])
+    meta["action_trace"].append(step)
+
+
+def _open_hidden_comment_entry_points(page: Page) -> list[str]:
+    clicked = []
+    for selector in COMMENT_REVEAL_SELECTORS:
+        try:
+            locator = page.locator(selector)
+            if locator.count() > 0 and locator.first.is_visible():
+                locator.first.scroll_into_view_if_needed()
+                locator.first.click(timeout=1000)
+                clicked.append(selector)
+                time.sleep(0.5)
+        except Exception:
+            continue
+    return clicked
+
+
+def _detect_complex_editor_signal(page: Page) -> str:
+    selectors = (
+        '[contenteditable="true"]',
+        '[role="textbox"]',
+        '.ql-editor',
+        '.ProseMirror',
+        '.fr-element',
+        '.public-DraftEditor-content',
+        '.cke_editable',
+        'iframe[src*="blogger"]',
+        'iframe[src*="disqus"]',
+        'iframe[src*="comment"]',
+    )
+    for selector in selectors:
+        try:
+            locator = page.locator(selector)
+            if locator.count() > 0:
+                return selector
+        except Exception:
+            continue
+    return ""
+
+
 def _maybe_bring_to_front(page, browser_cfg: dict) -> None:
     if not browser_cfg.get("bring_to_front", False):
         return
@@ -144,6 +280,33 @@ def _maybe_bring_to_front(page, browser_cfg: dict) -> None:
         page.bring_to_front()
     except Exception:
         pass
+
+
+def _acquire_cdp_work_page(browser_app, browser_cfg: dict):
+    contexts = list(getattr(browser_app, "contexts", []) or [])
+    if not contexts:
+        raise RuntimeError("CDP 已连接，但 Chrome 当前没有可用上下文。")
+
+    context = contexts[0]
+    pages = list(getattr(context, "pages", []) or [])
+    if pages:
+        page = pages[0]
+        try:
+            page.goto("about:blank", wait_until="domcontentloaded", timeout=5000)
+        except Exception:
+            pass
+        _maybe_bring_to_front(page, browser_cfg)
+        return context, page
+
+    try:
+        page = context.new_page()
+        _maybe_bring_to_front(page, browser_cfg)
+        return context, page
+    except Exception as exc:
+        raise RuntimeError(
+            "CDP 已连接，但当前 Chrome 会话不支持为默认上下文新建标签页。"
+            "请保留机器人 Chrome 的默认标签页，或重启 Start_Robot.command 后再试。"
+        ) from exc
 
 
 def _ensure_fast_page_routes(page: Page) -> None:
@@ -193,6 +356,18 @@ def _fast_navigate_for_commenting(page: Page, url: str, page_load_timeout_ms: in
             nav_meta["partial_navigation"] = True
             nav_meta["navigation_warning"] = warning
             return nav_meta
+        try:
+            fallback_timeout = min(8000, max(2500, effective_timeout // 2))
+            page.goto(url, timeout=fallback_timeout, wait_until="commit")
+            page.wait_for_timeout(800)
+            has_body = page.locator("body").count() > 0
+        except Exception:
+            has_body = False
+        if has_body and str(page.url or "") not in {"", "about:blank"}:
+            print(f"  ⚠️ 页面仅完成轻量导航，使用部分 DOM 继续尝试: {warning}")
+            nav_meta["partial_navigation"] = True
+            nav_meta["navigation_warning"] = warning
+            return nav_meta
         raise
 
     try:
@@ -200,6 +375,30 @@ def _fast_navigate_for_commenting(page: Page, url: str, page_load_timeout_ms: in
     except Exception:
         pass
     return nav_meta
+
+
+def _get_page_body_text(page: Page) -> str:
+    try:
+        return " ".join(page.locator("body").all_inner_texts()).lower()
+    except Exception:
+        return ""
+
+
+def _detect_hard_blocker(page: Page) -> tuple[bool, str]:
+    body_text = _get_page_body_text(page)
+    if any(marker in body_text for marker in COMMENTS_CLOSED_MARKERS):
+        return True, "页面提示评论已关闭"
+    if any(marker in body_text for marker in LOGIN_REQUIRED_MARKERS):
+        return True, "页面提示必须登录后才能评论"
+    if any(marker in body_text for marker in CHALLENGE_TEXT_MARKERS):
+        return True, "页面存在验证码或 Cloudflare 挑战"
+
+    for frame in getattr(page, "frames", []):
+        frame_url = str(getattr(frame, "url", "") or "").lower()
+        if any(marker in frame_url for marker in CHALLENGE_FRAME_MARKERS):
+            return True, "页面存在验证码或 Cloudflare 挑战 iframe"
+
+    return False, ""
 
 
 def _page_has_comment_signals(page: Page) -> tuple[bool, str]:
@@ -211,18 +410,90 @@ def _page_has_comment_signals(page: Page) -> tuple[bool, str]:
         except Exception:
             continue
 
-    try:
-        body_text = " ".join(page.locator("body").all_inner_texts()).lower()
-    except Exception:
-        body_text = ""
-
-    if any(marker in body_text for marker in ("comments are closed", "评论已关闭", "closed for comments")):
+    body_text = _get_page_body_text(page)
+    if any(marker in body_text for marker in COMMENTS_CLOSED_MARKERS):
         return False, "页面提示评论已关闭"
-    if any(marker in body_text for marker in ("log in to comment", "you must be logged in", "sign in to comment", "登录后评论")):
+    if any(marker in body_text for marker in LOGIN_REQUIRED_MARKERS):
         return False, "页面提示必须登录后才能评论"
+    if any(marker in body_text for marker in CHALLENGE_TEXT_MARKERS):
+        return False, "页面存在验证码或 Cloudflare 挑战"
     if any(marker in body_text for marker in ("leave a reply", "post a comment", "comment as", "发表评论", "评论")):
         return True, "页面文本包含评论区提示词"
+
+    for frame in getattr(page, "frames", []):
+        frame_url = str(getattr(frame, "url", "") or "").lower()
+        if any(marker in frame_url for marker in CHALLENGE_FRAME_MARKERS):
+            return False, "页面存在验证码或 Cloudflare 挑战 iframe"
+        if any(marker in frame_url for marker in ("comment", "reply", "blogger", "disqus", "wpdiscuz", "remark42", "giscus")):
+            return True, f"命中评论相关 iframe {frame_url[:60]}"
+
     return False, "DOM 与页面文本均未发现评论区线索"
+
+
+def _preprobe_page_for_generation(
+    page: Page,
+    url: str,
+    page_load_timeout_ms: int,
+    execution_mode: str,
+    recommended_strategy: str,
+) -> dict:
+    meta = {
+        "ok": True,
+        "message": "",
+        "diagnosis": "",
+        "diagnostic_category": "",
+        "navigation_warning": "",
+        "recommended_strategy": recommended_strategy,
+        "action_trace": [],
+    }
+    nav_meta = _fast_navigate_for_commenting(page, url, page_load_timeout_ms)
+    meta["navigation_warning"] = nav_meta.get("navigation_warning", "")
+    _append_agent_trace(meta, "navigate_page")
+
+    try_dismiss_overlays(page)
+    _append_agent_trace(meta, "dismiss_overlays")
+
+    _deep_scroll_to_bottom(page)
+    _append_agent_trace(meta, "deep_scroll")
+
+    if execution_mode == EXECUTION_MODE_AGENT:
+        clicked_selectors = _open_hidden_comment_entry_points(page)
+        if clicked_selectors:
+            _append_agent_trace(meta, f"reveal_comment_entry:{len(clicked_selectors)}")
+
+        complex_editor_selector = _detect_complex_editor_signal(page)
+        if complex_editor_selector:
+            meta["recommended_strategy"] = "iframe"
+            _append_agent_trace(meta, f"complex_editor:{complex_editor_selector}")
+
+    blocker_detected, blocker_reason = _detect_hard_blocker(page)
+    if blocker_detected:
+        meta.update(
+            {
+                "ok": False,
+                "message": "页面预探测判定当前页面不值得继续尝试。",
+                "diagnosis": blocker_reason,
+                "diagnostic_category": "hard_blocker",
+            }
+        )
+        _append_agent_trace(meta, "preprobe_stop")
+        return meta
+
+    has_comment_signal, comment_reason = _page_has_comment_signals(page)
+    if not has_comment_signal:
+        meta.update(
+            {
+                "ok": False,
+                "message": "页面预探测未发现可用评论区。",
+                "diagnosis": comment_reason,
+                "diagnostic_category": "comment_signal_missing",
+            }
+        )
+        _append_agent_trace(meta, "no_comment_signal")
+        return meta
+
+    _append_agent_trace(meta, "preprobe_pass")
+    return meta
 
 
 def _should_use_vision_fallback(layer1_message: str) -> bool:
@@ -243,19 +514,73 @@ def _should_use_vision_fallback(layer1_message: str) -> bool:
 def _build_task_failure_updates(task_row: dict, target: dict, reason: str, timestamp: str) -> dict:
     raw_url = task_row.get("来源链接", "")
     normalized_url = normalize_source_url(extract_cell_url(raw_url) or extract_cell_text(raw_url))
-    target_url = str(target.get("url", "") or task_row.get("目标网站", "") or "")
     return {
         "来源链接": normalized_url,
         "来源标题": str(task_row.get("来源标题", "") or ""),
         "根域名": str(task_row.get("根域名", "") or ""),
         "页面评分": str(task_row.get("页面评分", "") or ""),
         "目标站标识": str(target.get("site_key", "") or ""),
-        "目标网站": target_url,
         "状态": STATUS_PENDING_RETRY,
         "最后尝试时间": timestamp,
         "最近失败时间": timestamp,
         "最近失败原因": summarize_result_message(reason),
+        "最近失败分类": normalize_failure_category(reason=reason),
+        "执行模式": str(task_row.get("执行模式", "") or EXECUTION_MODE_CLASSIC),
+        "推荐策略": str(task_row.get("推荐策略", "") or "dom"),
+        "域名冷却至": "",
         "最后更新时间": timestamp,
+    }
+
+
+def _join_agent_trace(meta: dict) -> str:
+    trace = meta.get("action_trace", [])
+    if isinstance(trace, list):
+        return " | ".join(str(item) for item in trace[:12] if str(item).strip())
+    return str(trace or "")
+
+
+def _apply_agent_memory_result(
+    url: str,
+    success: bool,
+    execution_mode: str,
+    recommended_strategy: str,
+    diagnostic_category: str,
+    reason: str,
+    runtime_cfg: dict,
+) -> dict:
+    memory = AgentMemory()
+    normalized_category = normalize_failure_category(diagnostic_category, reason)
+    strategy = recommended_strategy or ("vision" if diagnostic_category == "vision_success" else "dom")
+    memory.record_result(
+        url,
+        success=success,
+        strategy=strategy,
+        failure_reason=reason,
+        failure_category=normalized_category,
+        execution_mode=execution_mode,
+    )
+
+    assist_cfg = runtime_cfg.get("agent_assist", {}) if isinstance(runtime_cfg, dict) else {}
+    cooldown_hours = int(assist_cfg.get("domain_cooldown_hours", 12) or 12)
+    temp_blacklist_hours = int(assist_cfg.get("temporary_blacklist_hours", 72) or 72)
+    profile = memory.get_site_profile(url)
+
+    if not success:
+        if normalized_category == "comment_unavailable":
+            memory.mark_blacklist(url, reason or "评论关闭或页面无评论区")
+        elif normalized_category == "page_protected":
+            memory.mark_temporary_blacklist(url, reason or "页面存在挑战/登录墙", hours=temp_blacklist_hours)
+        if (
+            normalized_category in {"network_timeout", "vision_unavailable", "page_protected", "editor_complex", "post_unverified"}
+            or int(profile.get("consecutive_failures", 0) or 0) >= int(assist_cfg.get("failure_threshold", 2) or 2)
+        ):
+            memory.set_cooldown(url, reason or normalized_category, hours=cooldown_hours)
+        profile = memory.get_site_profile(url)
+
+    return {
+        "normalized_category": normalized_category,
+        "cooldown_until": memory.get_cooldown_until(url),
+        "profile": profile,
     }
 
 
@@ -360,6 +685,46 @@ def _fill_additional_fields(target, name: str, email: str, website: str):
                 break
         except: continue
 
+
+def _try_reveal_comment_form(target) -> bool:
+    for selector in COMMENT_REVEAL_SELECTORS:
+        try:
+            locator = target.locator(selector).first
+            if locator.count() > 0 and locator.is_visible():
+                locator.click(timeout=1500, force=True)
+                time.sleep(0.5)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _try_fill_comment_editor(target, comment_content: str) -> tuple[bool, str]:
+    for selector in COMMENT_EDITOR_SELECTORS:
+        try:
+            editor = target.locator(selector).first
+            if editor.count() == 0 or not editor.is_visible():
+                continue
+            editor.scroll_into_view_if_needed()
+            try:
+                editor.fill(comment_content, timeout=2500)
+                return True, selector
+            except Exception:
+                pass
+            try:
+                editor.click(timeout=2500)
+            except Exception:
+                continue
+            try:
+                editor.press("Control+A", timeout=1000)
+            except Exception:
+                pass
+            editor.type(comment_content, delay=30, timeout=5000)
+            return True, selector
+        except Exception:
+            continue
+    return False, ""
+
 def _deep_scroll_to_bottom(page: Page):
     """
     分段深度滚动，模拟真人翻阅并触发长页面的懒加载。
@@ -369,10 +734,15 @@ def _deep_scroll_to_bottom(page: Page):
     for i in range(5):  # 最多滚 5 屏
         page.evaluate("window.scrollBy(0, 2000)")
         time.sleep(1.5) # 给点时间让内容蹦出来
+        _try_reveal_comment_form(page)
         # 实时检查是否已经看到评论框，看到了就提前收工
-        if page.locator('textarea, [contenteditable="true"]').first.is_visible():
-            print(f"  ✨ 在第 {i+1} 次滚动时提前发现评论框！")
-            return
+        for selector in COMMENT_EDITOR_SELECTORS:
+            try:
+                if page.locator(selector).count() > 0 and page.locator(selector).first.is_visible():
+                    print(f"  ✨ 在第 {i+1} 次滚动时提前发现评论框！")
+                    return
+            except Exception:
+                continue
     print("  🏁 深度滚动完毕。")
 
 def _diagnose_site_status(page: Page) -> str:
@@ -469,6 +839,9 @@ def auto_post_content(
     page_load_timeout_ms: int = 30000,
     enable_sso: bool = False,
     enable_vision: bool = True,
+    execution_mode: str = EXECUTION_MODE_CLASSIC,
+    recommended_strategy: str = "dom",
+    preprobe_meta: Optional[dict] = None,
 ) -> tuple[bool, str, dict]:
     """
     五层衰减策略全自动发帖机器人（已接入 AI 策略决策器）：
@@ -484,6 +857,9 @@ def auto_post_content(
         "diagnostic_category": "unclassified",
         "diagnosis": "",
         "navigation_warning": "",
+        "execution_mode": execution_mode,
+        "recommended_strategy": recommended_strategy,
+        "action_trace": [],
     }
 
     for attempt in range(max_retries):
@@ -492,21 +868,55 @@ def auto_post_content(
             time.sleep(5)
 
         try:
-            nav_meta = _fast_navigate_for_commenting(page, url, page_load_timeout_ms)
-            meta.update(nav_meta)
+            if preprobe_meta:
+                meta.update({k: v for k, v in preprobe_meta.items() if k in {"navigation_warning", "recommended_strategy"}})
+                for step in preprobe_meta.get("action_trace", []):
+                    _append_agent_trace(meta, step)
+            else:
+                nav_meta = _fast_navigate_for_commenting(page, url, page_load_timeout_ms)
+                meta.update(nav_meta)
+                _append_agent_trace(meta, "navigate_page")
 
-            # 【预处理】关闭 GDPR Cookie 弹窗
-            try_dismiss_overlays(page)
+                # 【预处理】关闭 GDPR Cookie 弹窗
+                try_dismiss_overlays(page)
+                _append_agent_trace(meta, "dismiss_overlays")
 
-            # 【优化】深滚动触发评论框加载 (针对长页面/懒加载)
-            _deep_scroll_to_bottom(page)
+                # 【优化】深滚动触发评论框加载 (针对长页面/懒加载)
+                _deep_scroll_to_bottom(page)
+                _append_agent_trace(meta, "deep_scroll")
+
+                if execution_mode == EXECUTION_MODE_AGENT:
+                    clicked_selectors = _open_hidden_comment_entry_points(page)
+                    if clicked_selectors:
+                        _append_agent_trace(meta, f"reveal_comment_entry:{len(clicked_selectors)}")
+
+                    complex_editor_selector = _detect_complex_editor_signal(page)
+                    if complex_editor_selector:
+                        meta["recommended_strategy"] = "iframe"
+                        _append_agent_trace(meta, f"complex_editor:{complex_editor_selector}")
+
+                    blocker_detected, blocker_reason = _detect_hard_blocker(page)
+                    if blocker_detected:
+                        meta["diagnostic_category"] = "hard_blocker"
+                        meta["diagnosis"] = blocker_reason
+                        _append_agent_trace(meta, "preprobe_stop")
+                        return False, format_notes("Agent 预探测判定当前页面不值得继续尝试。", blocker_reason), meta
+
+                    has_comment_signal, comment_reason = _page_has_comment_signals(page)
+                    if not has_comment_signal:
+                        meta["diagnostic_category"] = "comment_signal_missing"
+                        meta["diagnosis"] = comment_reason
+                        _append_agent_trace(meta, "no_comment_signal")
+                        return False, format_notes("Agent 预探测未发现可用评论区。", comment_reason), meta
 
             # ===== Layer 1：传统 DOM 识别 =====
             layer1_result = _try_dom_post(page, comment_content, name, email, website, anchor_text=anchor_text)
             if layer1_result[0]:
                 meta["diagnostic_category"] = "dom_success"
+                _append_agent_trace(meta, "dom_success")
                 return True, layer1_result[1], meta
             last_error = summarize_result_message(layer1_result[1])
+            _append_agent_trace(meta, "dom_failed")
 
             # DOM 已提交但无法确认成功（已填写了内容），不继续降级避免重复发帖
             should_use_vision = _should_use_vision_fallback(layer1_result[1])
@@ -543,6 +953,15 @@ def auto_post_content(
 
             # ===== Layer 3：AI 策略决策器（动态选择后续路径）=====
             if enable_vision:
+                blocker_detected, blocker_reason = _detect_hard_blocker(page)
+                if blocker_detected:
+                    meta["diagnostic_category"] = "hard_blocker"
+                    meta["diagnosis"] = blocker_reason
+                    last_error = summarize_result_message(
+                        f"{last_error} | 已跳过 Vision：{blocker_reason}".strip(" |")
+                    )
+                    return False, format_notes(last_error, blocker_reason), meta
+
                 # 获取当前页面截图，供 AI 分析
                 _screenshot_bytes: Optional[bytes] = None
                 try:
@@ -559,7 +978,12 @@ def auto_post_content(
                 else:
                     _err_code = "dom_submit_failed"
 
-                from strategy_decider import decide_next_strategy, should_try_vision, should_skip as sd_should_skip
+                from strategy_decider import (
+                    decide_next_strategy,
+                    should_retry_dom as sd_should_retry_dom,
+                    should_try_vision,
+                    should_skip as sd_should_skip,
+                )
 
                 decision = decide_next_strategy(
                     error_code=_err_code,
@@ -581,15 +1005,31 @@ def auto_post_content(
                     print(f"  🚫 AI 决策：跳过此站点 | {decision.get('reason', '')}")
 
                 else:
+                    if execution_mode == EXECUTION_MODE_AGENT and sd_should_retry_dom(decision):
+                        _append_agent_trace(meta, "agent_retry_dom")
+                        try_dismiss_overlays(page)
+                        retry_result = _try_dom_post(
+                            page, comment_content, name, email, website, anchor_text=anchor_text
+                        )
+                        if retry_result[0]:
+                            meta["diagnostic_category"] = "agent_retry_dom_success"
+                            return True, retry_result[1], meta
+                        last_error = summarize_result_message(retry_result[1])
+
                     # AI 判断可以尝试 Vision（或其他策略）
                     should_probe_vision, reason = _page_has_comment_signals(page)
-                    if should_probe_vision or should_try_vision(decision):
+                    allow_vision = should_probe_vision or (
+                        nav_meta.get("partial_navigation") and should_try_vision(decision)
+                    )
+                    if allow_vision:
+                        _append_agent_trace(meta, "vision_attempt")
                         print(f"  🤖 Layer 4：调用 Gemini Vision AI 分析网页截图（AI 决策：{decision.get('action')}）...")
                         from vision_agent import try_post_via_vision
 
                         vision_result = try_post_via_vision(page, comment_content)
                         meta.update(vision_result[2])
                         if vision_result[0]:
+                            _append_agent_trace(meta, "vision_success")
                             return True, vision_result[1], meta
                         last_error = summarize_result_message(vision_result[1])
                     else:
@@ -961,32 +1401,13 @@ def _try_dom_post(
     """
     # 记录原始 URL 用于判断重定向
     setattr(page, "_original_url", page.url)
-    
-    # 方式 1：主页面传统 textarea
-    textareas = page.locator('textarea:visible')
-    if textareas.count() > 0:
-        print("  👁️ 找到 <textarea> 输入框，正在填写...")
-        # 尝试填写额外字段
+    _try_reveal_comment_form(page)
+
+    # 方式 1：主页面评论编辑器
+    page_filled, selector = _try_fill_comment_editor(page, comment_content)
+    if page_filled:
+        print(f"  👁️ 找到主页面评论框 [{selector}]，正在提交...")
         _fill_additional_fields(page, name, email, website)
-        
-        ta = textareas.first
-        ta.scroll_into_view_if_needed()
-        ta.fill(comment_content)
-        time.sleep(1)
-        return _try_submit(page, comment_content, target_url=website, anchor_text=anchor_text)
-    
-    # 方式 2：主页面 contenteditable 富文本框
-    content_editables = page.locator('[contenteditable="true"]:visible')
-    if content_editables.count() > 0:
-        print("  👁️ 找到 contenteditable 富文本评论框，正在填写...")
-        # 尝试填写额外字段
-        _fill_additional_fields(page, name, email, website)
-        
-        ce = content_editables.first
-        ce.scroll_into_view_if_needed()
-        ce.click()
-        time.sleep(0.3)
-        page.keyboard.type(comment_content, delay=30)
         time.sleep(1)
         return _try_submit(page, comment_content, target_url=website, anchor_text=anchor_text)
     
@@ -1003,31 +1424,14 @@ def _try_dom_post(
                     continue
                 
                 print(f"  📦 检查 iframe: {frame_url[:60]}...")
+                _try_reveal_comment_form(frame)
                 
-                # 情况 A: 内部有 textarea
-                frame_textareas = frame.locator('textarea:visible')
-                if frame_textareas.count() > 0:
-                    print(f"  👁️ 在 iframe 内发现 <textarea>，准备开始填写...")
+                frame_filled, selector = _try_fill_comment_editor(frame, comment_content)
+                if frame_filled:
+                    print(f"  👁️ 在 iframe 内发现评论框 [{selector}]，准备开始填写...")
                     if "blogger.com" in frame_url or "blogblog.com" in frame_url:
                         _handle_blogger_identity(frame)
                     _fill_additional_fields(frame, name, email, website)
-                    ft = frame_textareas.first
-                    ft.click(timeout=3000)
-                    ft.fill(comment_content)
-                    return True, _try_submit_in_frame(
-                        frame, page, comment_content, target_url=website, anchor_text=anchor_text
-                    )
-                
-                # 情况 B: 内部有 contenteditable
-                frame_editables = frame.locator('[contenteditable="true"]:visible')
-                if frame_editables.count() > 0:
-                    print(f"  👁️ 在 iframe 内发现富文本框，准备开始填写...")
-                    if "blogger.com" in frame_url or "blogblog.com" in frame_url:
-                        _handle_blogger_identity(frame)
-                    _fill_additional_fields(frame, name, email, website)
-                    fe = frame_editables.first
-                    fe.click(timeout=3000)
-                    fe.type(comment_content, delay=30)
                     return True, _try_submit_in_frame(
                         frame, page, comment_content, target_url=website, anchor_text=anchor_text
                     )
@@ -1156,11 +1560,14 @@ def process_task(
     link_format, link_format_analysis = resolve_runtime_link_format(url, current_link_format, source_row=source_row)
     generation_link_format = link_format if link_format and link_format != "unknown" else "plain_text"
     batch_token = str(task_row.get("目标站标识", "") or "")
+    execution_mode = str(task_row.get("执行模式", "") or EXECUTION_MODE_CLASSIC)
+    recommended_strategy = str(task_row.get("推荐策略", "") or "dom")
 
     if not url:
         raise ValueError("任务来源链接为空，无法执行发帖。")
     
     print(f"\n🚀 开始处理来源 {url} -> 站点 {target.get('site_key', '')}")
+    print(f"  🧭 执行模式={execution_mode} | 推荐策略={recommended_strategy}")
     if link_format_analysis:
         print(
             "  🔎 Link_Format 预判："
@@ -1168,10 +1575,73 @@ def process_task(
             f"证据={link_format_analysis.get('evidence_type', 'unknown')} | "
             f"置信度={link_format_analysis.get('confidence', 0)}"
         )
-    
-    # 步骤 1：AI 生成文案
-    print("  [1/3] 🤖 AI 正在生成外链推广文案...")
-    page_context = fetch_page_context(url)
+
+    ai_cfg = runtime_cfg.get("ai_generation", {})
+    preprobe_meta = None
+    if ai_cfg.get("preprobe_before_generation", True):
+        print("  [1/4] 🔎 先做页面预探测，确认值得继续后再调用 AI...")
+        preprobe_meta = _preprobe_page_for_generation(
+            page,
+            url,
+            runtime_cfg["execution"]["page_load_timeout_ms"],
+            execution_mode,
+            recommended_strategy,
+        )
+        recommended_strategy = str(preprobe_meta.get("recommended_strategy", "") or recommended_strategy)
+        if not preprobe_meta.get("ok", True):
+            print(f"  ⛔ 预探测提前收口：{preprobe_meta.get('diagnosis', '')}")
+            last_updated_value = time.strftime('%Y-%m-%d %H:%M:%S')
+            failure_message = format_notes(
+                summarize_result_message(preprobe_meta.get("message", "页面预探测失败")),
+                preprobe_meta.get("diagnosis", ""),
+            )
+            memory_meta = _apply_agent_memory_result(
+                url=url,
+                success=False,
+                execution_mode=execution_mode,
+                recommended_strategy=recommended_strategy,
+                diagnostic_category=str(preprobe_meta.get("diagnostic_category", "") or ""),
+                reason=failure_message,
+                runtime_cfg=runtime_cfg,
+            )
+            updates = {
+                "来源链接": url,
+                "来源标题": str(task_row.get("来源标题", "") or ""),
+                "根域名": str(task_row.get("根域名", "") or ""),
+                "页面评分": str(task_row.get("页面评分", "") or ""),
+                "目标站标识": str(target.get("site_key", "") or ""),
+                "最后尝试时间": last_updated_value,
+                "当前评论内容": "",
+                "链接格式": link_format,
+                "来源类型": str(task_row.get("来源类型", "") or ""),
+                "有网址字段": str(task_row.get("有网址字段", "") or ""),
+                "有验证码": str(task_row.get("有验证码", "") or ""),
+                "执行模式": execution_mode,
+                "推荐策略": recommended_strategy,
+                "最近失败分类": memory_meta["normalized_category"],
+                "域名冷却至": _format_memory_dt(memory_meta.get("cooldown_until", "")) if memory_meta.get("cooldown_until") else "",
+                "最后更新时间": last_updated_value,
+                "状态": "待重试",
+                "最近失败时间": last_updated_value,
+                "最近失败原因": failure_message,
+                "Agent动作轨迹": " > ".join(preprobe_meta.get("action_trace", [])),
+            }
+            workbook.upsert_status_row(updates)
+            return {
+                "success": False,
+                "message": failure_message,
+                "url": url,
+                "status_updates": updates,
+                "diagnosis": str(preprobe_meta.get("diagnosis", "") or ""),
+                "diagnostic_category": str(preprobe_meta.get("diagnostic_category", "") or ""),
+            }
+
+    # 步骤 2：AI 生成文案
+    print("  [2/4] 🤖 AI 正在生成外链推广文案...")
+    page_context = fetch_page_context(
+        url,
+        include_comments_summary=bool(ai_cfg.get("generate_comment_summary", False)),
+    )
     print(
         f"  🌍 页面语言={page_context.get('language_name', 'English')} | 标题={summarize_result_message(page_context.get('title', ''), 80)}"
     )
@@ -1189,7 +1659,12 @@ def process_task(
         target_url = active_target["url"]
         
         print(f"  📋 使用飞书目标站配置：锚文本='{active_target.get('anchor_text', '')}' -> {target_url}")
-        content_bundle = generate_localized_bundle_for_target(active_target, generation_link_format, page_context)
+        content_bundle = generate_localized_bundle_for_target(
+            active_target,
+            generation_link_format,
+            page_context,
+            include_chinese_translation=bool(ai_cfg.get("generate_chinese_translation", False)),
+        )
         keywords = content_bundle["keywords"]
         anchor_text = content_bundle["anchor_text"]
         comment_content = content_bundle["comment_content"]
@@ -1206,12 +1681,15 @@ def process_task(
             keywords = analyze_keywords(MY_TARGET_WEBSITE, page_context.get("excerpt", ""))
         anchor_text = generate_anchor_text(keywords, generation_link_format, MY_TARGET_WEBSITE)
         comment_content = generate_comment(anchor_text, page_context.get("title", ""))
-        from ai_generator import translate_comment_to_chinese
+        if ai_cfg.get("generate_chinese_translation", False):
+            from ai_generator import translate_comment_to_chinese
 
-        comment_content_zh = translate_comment_to_chinese(comment_content)
+            comment_content_zh = translate_comment_to_chinese(comment_content)
+        else:
+            comment_content_zh = ""
     
-    # 步骤 2：自动发帖（带重试机制）
-    print("  [2/3] 🌐 开始接管真实 Chrome 进行自动发帖...")
+    # 步骤 3：自动发帖（带重试机制）
+    print("  [3/4] 🌐 开始接管真实 Chrome 进行自动发帖...")
     is_success, result_msg, run_meta = auto_post_content(
         page,
         comment_content,
@@ -1224,16 +1702,28 @@ def process_task(
         page_load_timeout_ms=runtime_cfg["execution"]["page_load_timeout_ms"],
         enable_sso=runtime_cfg["execution"]["enable_sso"],
         enable_vision=runtime_cfg["vision"]["enabled"],
+        execution_mode=execution_mode,
+        recommended_strategy=recommended_strategy,
+        preprobe_meta=preprobe_meta,
     )
     print(f"  🤖 发帖结果: {result_msg}")
     
-    # 步骤 3：结果写回飞书状态表
-    print("  [3/3] 📝 更新结果至飞书状态表...")
+    # 步骤 4：结果写回飞书状态表
+    print("  [4/4] 📝 更新结果至飞书状态表...")
     notes_message = format_notes(
         summarize_result_message(result_msg),
         run_meta.get("diagnosis", ""),
     )
     last_updated_value = time.strftime('%Y-%m-%d %H:%M:%S')
+    memory_meta = _apply_agent_memory_result(
+        url=url,
+        success=is_success,
+        execution_mode=execution_mode,
+        recommended_strategy=str(run_meta.get("recommended_strategy", "") or recommended_strategy),
+        diagnostic_category=str(run_meta.get("diagnostic_category", "") or ""),
+        reason=notes_message,
+        runtime_cfg=runtime_cfg,
+    )
 
     updates = {
         "来源链接": url,
@@ -1241,23 +1731,22 @@ def process_task(
         "根域名": str(task_row.get("根域名", "") or ""),
         "页面评分": str(task_row.get("页面评分", "") or ""),
         "目标站标识": str(target.get("site_key", "") or ""),
-        "目标网站": target_url,
         "最后尝试时间": last_updated_value,
         "当前评论内容": comment_content,
-        "当前评论内容中文": comment_content_zh,
-        "当前锚文本": anchor_text,
-        "关键词": keywords,
         "链接格式": link_format,
         "来源类型": str(task_row.get("来源类型", "") or ""),
         "有网址字段": str(task_row.get("有网址字段", "") or ""),
         "有验证码": str(task_row.get("有验证码", "") or ""),
+        "执行模式": execution_mode,
+        "推荐策略": str(run_meta.get("recommended_strategy", "") or recommended_strategy),
+        "最近失败分类": "" if is_success else memory_meta["normalized_category"],
+        "域名冷却至": _format_memory_dt(memory_meta.get("cooldown_until", "")) if memory_meta.get("cooldown_until") else "",
         "最后更新时间": last_updated_value,
     }
     
     if is_success:
         updates["状态"] = STATUS_SUCCESS
         updates["最近成功时间"] = last_updated_value
-        updates["成功链接"] = url
         updates["最近失败时间"] = ""
         updates["最近失败原因"] = ""
         updates["下次可发时间"] = ""
@@ -1277,6 +1766,9 @@ def process_task(
         "site_key": str(target.get("site_key", "") or ""),
         "used_vision": run_meta.get("used_vision", False),
         "diagnostic_category": run_meta.get("diagnostic_category", ""),
+        "execution_mode": execution_mode,
+        "recommended_strategy": str(run_meta.get("recommended_strategy", "") or recommended_strategy),
+        "memory_recorded": True,
     }
     return result
 
@@ -1312,16 +1804,16 @@ def run_once(selected_tasks: Optional[list[dict]] = None, send_report: bool = Tr
     print(f"🕸️ 正在连接你的本地 Chrome 浏览器（{cdp_url}）...")
     with sync_playwright() as p:
         try:
+            ensure_cdp_blank_page(cdp_url)
             browser_app = p.chromium.connect_over_cdp(cdp_url)
             print("🤩 成功接管本地真实 Chrome！指纹认证已生效。\n")
-            context = browser_app.contexts[0]
-            work_page = context.new_page()
-            _maybe_bring_to_front(work_page, browser_cfg)
+            context, work_page = _acquire_cdp_work_page(browser_app, browser_cfg)
 
             for idx, task in enumerate(tasks, start=1):
                 if work_page.is_closed():
-                    work_page = context.new_page()
-                _maybe_bring_to_front(work_page, browser_cfg)
+                    context, work_page = _acquire_cdp_work_page(browser_app, browser_cfg)
+                else:
+                    _maybe_bring_to_front(work_page, browser_cfg)
                 print(f"\n>>> 进度: {idx}/{len(tasks)}")
                 try:
                     res = process_task(
@@ -1338,12 +1830,26 @@ def run_once(selected_tasks: Optional[list[dict]] = None, send_report: bool = Tr
                         summarize_result_message(f"运行时异常: {translate_error(str(e))}"),
                         "任务执行中断，已自动回退为待重试。",
                     )
+                    memory_meta = _apply_agent_memory_result(
+                        url=normalize_source_url(
+                            extract_cell_url(task["status_row"].get("来源链接", ""))
+                            or extract_cell_text(task["status_row"].get("来源链接", ""))
+                        ),
+                        success=False,
+                        execution_mode=str(task["status_row"].get("执行模式", "") or EXECUTION_MODE_CLASSIC),
+                        recommended_strategy=str(task["status_row"].get("推荐策略", "") or "dom"),
+                        diagnostic_category="task_exception",
+                        reason=reason,
+                        runtime_cfg=runtime_cfg,
+                    )
                     print(f"  ❌ 单条任务异常，已回退为待重试: {reason}")
+                    failure_updates = _build_task_failure_updates(task["status_row"], task["target"], reason, last_updated_value)
+                    failure_updates["域名冷却至"] = _format_memory_dt(memory_meta.get("cooldown_until", "")) if memory_meta.get("cooldown_until") else ""
                     workbook.upsert_sheet_dict(
                         "records",
                         STATUS_HEADERS,
                         ["来源链接", "目标站标识"],
-                        _build_task_failure_updates(task["status_row"], task["target"], reason, last_updated_value),
+                        failure_updates,
                     )
                     res = {
                         "success": False,
@@ -1358,6 +1864,7 @@ def run_once(selected_tasks: Optional[list[dict]] = None, send_report: bool = Tr
                         "site_key": str(task["target"].get("site_key", "") or ""),
                         "used_vision": False,
                         "diagnostic_category": "task_exception",
+                        "memory_recorded": True,
                     }
                     if not work_page.is_closed():
                         work_page.close()

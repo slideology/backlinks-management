@@ -20,7 +20,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from agents.base_agent import AgentMessage, BaseAgent
+from agents.base_agent import AgentMessage, BaseAgent, resolve_multi_agent_model
 
 
 class SchedulerAgent(BaseAgent):
@@ -38,7 +38,7 @@ class SchedulerAgent(BaseAgent):
         super().__init__(
             name="SchedulerAgent",
             role_description="智能任务调度员，负责从飞书获取任务并按成功率排序，过滤黑名单站点",
-            model="gemini-2.0-flash",
+            model=resolve_multi_agent_model(config_path, "scheduler", "gemini-flash-lite-latest"),
             config_path=config_path,
         )
         # 懒加载记忆模块

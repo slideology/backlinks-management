@@ -6,20 +6,20 @@
 
 ## 🚀 核心架构与运行流程
 
-整个爬虫分发流水线实现了 **每日自动调度 -> AI 自动撰写话术 -> 接管带指纹真实浏览器自动跟帖 -> 结果核验回传 Google 表 -> 飞书战报送达** 的全闭环链路。
+整个爬虫分发流水线实现了 **每日自动调度 -> AI 自动撰写话术 -> 接管带指纹真实浏览器自动跟帖 -> 结果核验回传飞书运营总表 -> 飞书战报送达** 的全闭环链路。
 
 1. **`daily_scheduler.py` (每日配额调度)**：
-   它每天启动时会读取你的 Google Sheets，挑选 5-10 条尚未发布（`pending`）且优先级最高的外链任务，将它们打上今日的专属标签和标记为 `in_progress`。
+   它每天启动时会读取飞书运营总表中的当前状态，按“单站当天成功目标”动态补齐任务池，并把当轮选中的任务切换为 `进行中`。
 2. **`ai_generator.py` (智能大脑内容生成)**：
    借助 Gemini 大模型 API，根据你要推广的网站（默认为 Slideology）自动生成优质的 SEO Keyword，并根据该网站提取行业信息，生成长段自然真实的英文推荐帖。
 3. **`form_automation_local.py` (无头变有头：真实指纹防封印分发)**：
-   不再开启容易被当作爬虫的“无头（Headless）”默认浏览器，而是接管独立的机器人 **Google Chrome（开启 9222 调试端点）** 中运行。默认不会主动抢前台，也不会显式调用 `bring_to_front()`；但如果站点自身触发登录弹窗或系统切换窗口，机器人 Chrome 仍可能偶发被激活。该脚本会优先走 DOM/iframe 自动化，只有在失败后才启用 Vision 兜底。
+   不再开启容易被当作爬虫的“无头（Headless）”默认浏览器，而是接管独立的机器人 **Google Chrome Canary（默认监听 `9666` 调试端点）** 中运行；如果本机没有 Canary，才会回退到普通 `Google Chrome`。默认不会主动抢前台，也不会显式调用 `bring_to_front()`；但如果站点自身触发登录弹窗或系统切换窗口，机器人 Chrome 仍可能偶发被激活。该脚本会优先走 DOM/iframe 自动化，只有在失败后才启用 Vision 兜底。
 4. **`webhook_sender.py` (飞书集成播报)**：
    发布跑单结束后，不管成果或失败多少笔都会组合成精美的卡片推送到您的飞书机器人群组中。
 5. **`feishu_integration.py` (飞书表格写入)**：
    在保留飞书群机器人通知的同时，新增飞书开放平台应用集成，可将每条任务执行记录同步写入飞书表格，便于后续做台账和筛选。
-6. **`gws_integration.py` (Google Sheets 内核)**：
-   作为数据操作总控端，全权负责 Google OAuth 2 鉴权与表格单行改写。
+6. **`feishu_workbook.py` (飞书运营总表中台)**：
+   负责 5 张运营 tab 的读取、增量同步、失败缓冲与状态回写，是当前业务事实源的核心封装。
 
 ---
 
@@ -63,15 +63,15 @@ launchctl kickstart -k gui/$(id -u)/com.backlink.robot.daily
 
 项目现在会额外维护一份**中文运营总表**，专门给人工查看，不直接参与自动化主链路。
 
-- 工作簿链接：[外链运营总表](https://gcnbv8csilt1.feishu.cn/sheets/XvM6s6XrRhConltP1pUcaLpznDc)
+- 工作簿链接：[外链运营总表](https://gcnbv8csilt1.feishu.cn/sheets/JaL2sOUGBhKI2ytFL17chrjqngb)
 - 状态文件：[/Users/dahuang/CascadeProjects/test/backlink-management/artifacts/reporting_workbook/state.json](/Users/dahuang/CascadeProjects/test/backlink-management/artifacts/reporting_workbook/state.json)
 - 手动同步脚本：[/Users/dahuang/CascadeProjects/test/backlink-management/sync_reporting_workbook.py](/Users/dahuang/CascadeProjects/test/backlink-management/sync_reporting_workbook.py)
 
 这份工作簿当前包含 5 个中文 sheet：
-- `来源主表`：一行一个来源 URL，展示当前应发站点、最近成功站点、下次可推进时间和各站点展开状态
-- `站点发布状态表`：一行 = 一个 `来源 URL x 目标站` 的当前状态，是新的调度事实表
+- `来源总表`：一行一个来源 URL，展示当前应发站点、最近成功站点、下次可推进时间和各站点展开状态
+- `发布记录表`：一行 = 一个 `来源 URL x 目标站` 的当前状态，是新的调度事实表
 - `目标站表`：维护当前推广站点、站点标识、优先级、冷却天数、每日成功目标与是否启用
-- `旧表历史事实表`：把旧飞书历史库标准化成“历史已成功事实”，用于初始化新状态模型
+- `历史去重表`：把旧飞书历史库标准化成“历史已成功事实”，用于初始化新状态模型
 - `旧表全量来源库`：保留旧表高分来源与原始标记，供历史核对和后续补数
 
 展示规则已经收口为：
@@ -90,7 +90,7 @@ launchctl kickstart -k gui/$(id -u)/com.backlink.robot.daily
 1. **Google Sheets OAuth**: 请确保你配置了桌面级 Oauth 并放在了 `~/.config/gws/client_secret.json` 中，并在第一次运行时生成 `token.json`。
 2. **环境变量**: 编辑项目目录下的 `.env` 文件，输入 `GEMINI_API_KEY=xxx` 以启用 AI 写稿系统。
 3. **飞书机器人**: 打开项目目录下的 `config.json` 文件，粘贴你的飞书群组自定义机器人 Webhook URL。
-4. **飞书表格（可选）**: 若要同步写飞书表格，请在 `config.json` 中补齐 `feishu.enabled/app_id/app_secret/spreadsheet_token/sheet_id`。
+4. **飞书表格**: 当前业务事实源已经切到飞书，请在 `config.json` 中保持 `feishu.enabled/app_id/app_secret/spreadsheet_token/sheet_id` 正确。
 
 ---
 
@@ -119,6 +119,137 @@ launchctl kickstart -k gui/$(id -u)/com.backlink.robot.daily
 
 ## 📅 2026-03-27 最近工作摘要
 
+## 📅 2026-04-09 工作日志
+
+### ✅ 今日完成
+
+#### 1. 重建了一个全新的飞书运营总表
+- 旧工作簿虽然下载出来的 CSV 只有约 `985K`，但飞书云端显示占用已膨胀到 `15GB+`，判断主要是长期整表覆盖导致的版本历史/内部存储膨胀，而不是当前数据本身过大。
+- 已新建并切换到新的工作簿：
+  [外链运营总表](https://gcnbv8csilt1.feishu.cn/sheets/JaL2sOUGBhKI2ytFL17chrjqngb)
+- 当前项目配置、状态文件、自动任务写回目标都已切到新工作簿。
+
+#### 2. 对 5 个 tab 做了一轮精简
+- `来源总表`：从 `45` 列精简到 `36` 列
+- `发布记录表`：从 `27` 列精简到 `21` 列
+- `目标站表`：保留 `10` 列
+- `历史去重表`：保留 `8` 列
+- `旧表全量来源库`：保留 `10` 列
+- 重点裁掉了一批证据类和重复展示列，例如：
+  - `当前应发站点URL`
+  - `Agent动作轨迹`
+  - `是否视觉复核`
+  - 多组 `...探测证据`
+  - 多组时间戳明细列
+
+#### 3. 同步策略已改成“增量同步优先”
+- `sync_reporting_workbook.py` 不再默认整表覆盖，而是按主键增量更新：
+  - `来源总表`：按 `来源链接`
+  - `发布记录表`：按 `来源链接 + 目标站标识`
+  - `目标站表`：按 `站点标识`
+  - `历史去重表`：按 `来源链接 + 目标站标识`
+  - `旧表全量来源库`：按 `来源链接`
+- 只在“新建工作簿首次灌数”时继续使用批量整表写入，避免飞书 `90217 too many request`。
+
+#### 4. 已验证自动任务后续只会写新工作簿
+- `config.json` 中的飞书 token / sheet 已切到新表。
+- `artifacts/reporting_workbook/state.json` 已切到新表。
+- 已手动执行一次：
+  `./.venv311/bin/python sync_reporting_workbook.py`
+- 同步成功，确认写入目标是新工作簿，不再落旧表。
+
+#### 5. 新增了工作簿重建工具
+- 新增脚本：
+  [recreate_feishu_workbook_from_current.py](/Users/dahuang/CascadeProjects/test/backlink-management/recreate_feishu_workbook_from_current.py)
+- 用途：
+  - 从“当前飞书状态快照”直接重建一个全新的运营总表
+  - 自动切换项目配置和状态文件
+  - 适合以后再次出现飞书体积异常膨胀时快速迁移
+
+#### 6. 回归验证通过
+- 运行：
+  `./.venv311/bin/python -m unittest discover -s tests`
+- 当前全量测试：`163` 个通过
+
+### 📋 接下来待办
+
+#### 高优先级
+- [ ] **验证新工作簿在真实自动任务中的写回表现**：建议跑一轮真实任务，确认成功/失败状态、站点统计、通知链路都能正常落到新表。
+- [ ] **继续降低 `发布记录表` 重试池膨胀速度**：当前剩余失败大头还是 `待重试`，需要继续靠站点止损、域名冷却和复杂页分流来压。
+- [ ] **进一步减少新表的无效写入**：让任务执行链尽量走局部字段更新，继续减少飞书版本历史增长速度。
+
+#### 中优先级
+- [ ] **继续清理 README 顶部旧的 Google Sheets 描述**：目前已经收口了一部分，但仍有少量历史表述可以继续压缩。
+- [ ] **为重建脚本补一组自动化测试**：覆盖“旧工作簿读取快照 -> 新工作簿重建 -> 切换 state/config”的完整流程。
+
+#### 低优先级
+- [ ] **评估是否为历史表单独拆一个归档工作簿**：如果后续 `历史去重表` / `旧表全量来源库` 继续增大，可再把归档与运行态分离。
+- [ ] **继续压缩 README 历史日志**：把 3 月份的多段工作日志整理成更短的阶段性里程碑。
+
+---
+
+## 📅 2026-04-17 最近工作摘要
+
+### ✅ 最近完成
+
+#### 1. 机器人浏览器链路切到 `9666`
+- 浏览器连接策略已从旧默认端口统一切到：
+  - `browser.connect_cdp_url = http://127.0.0.1:9666`
+  - `browser.allow_only_cdp_url = http://127.0.0.1:9666`
+- `browser_cdp.py`、`Start_Robot.command`、正式执行链和探测脚本都已跟随配置读取，不再需要手工改多处端口。
+- 新链路已实测通过 `CDP` 健康检查，并能拉起 `daily_run_orchestrator.py`。
+
+#### 2. 机器人浏览器改成优先使用 Chrome Canary
+- `Start_Robot.command` 现在会优先使用：
+  - `/Applications/Google Chrome Canary.app`
+- 如果本机没有 Canary，才会回退到普通 `Google Chrome`。
+- 这样做的主要目的是把：
+  - 你的日常 `Google Chrome`
+  - 机器人的独立浏览器实例
+  明确分开，减少启动台误激活机器人实例的问题。
+
+#### 3. `Start_Robot.command` 启动逻辑继续加固
+- 启动脚本现在会先读取 `config.json` 中的浏览器端口，再启动或复用机器人浏览器。
+- 启动前会做：
+  - `/json/version` 可达性检查
+  - `ensure_cdp_blank_page()` 空白页补建
+  - `Playwright connect_over_cdp` 健康检查
+- 只有通过健康检查后，才会继续拉起日总控，避免“端口开着但会话不健康”时盲目进入任务。
+
+#### 4. 清理了一批无效外链：`search.yahoo.com`
+- 已确认当前运营表里这批无效源共有：
+  - `60` 条待发状态记录
+  - 对应 `30` 个来源链接
+- 这些记录已从当前运营总表链路里清掉。
+- 同时已加入永久排除配置：
+  - `reporting_workbook.excluded_source_domains = ["search.yahoo.com"]`
+- 现在同步时会自动过滤这类无效来源，避免后续又回流进：
+  - `来源总表`
+  - `发布记录表`
+  - `旧表全量来源库`
+
+#### 5. 飞书新工作簿继续作为唯一运营事实源
+- 当前正式写入工作簿仍然是：
+  [外链运营总表](https://gcnbv8csilt1.feishu.cn/sheets/JaL2sOUGBhKI2ytFL17chrjqngb)
+- 本地配置、状态文件、自动同步链路都仍然指向这个新工作簿。
+- 现在同步策略依然保持“增量同步优先”，避免再走大规模整表覆盖。
+
+### 📋 接下来待办
+
+#### 高优先级
+- [ ] **继续验证 `9666 + Chrome Canary` 的正式任务稳定性**：当前新链路已确认能启动，但仍需继续观察执行模块是否稳定消除旧 `connect_over_cdp` 断连问题。
+- [ ] **补一轮“搜索结果页 / 聚合页”黑名单清理**：除了 `search.yahoo.com`，建议继续排查 `google.com/search`、`bing.com/search`、`r.search.yahoo.com` 等结果页域名。
+- [ ] **清理旧日志造成的判断噪音**：当前 `launchd.stdout.log` 仍混有旧端口轮次输出，后续排查时容易误判，应考虑分轮次日志或定期归档。
+
+#### 中优先级
+- [ ] **把 README 里残留的旧端口描述继续收口**：当前顶部说明已改，但文档后半段和实现说明里仍可能残留历史表述。
+- [ ] **为 `excluded_source_domains` 补自动化测试**：验证这些黑名单域名在构建快照和同步时都会被稳定过滤。
+
+#### 低优先级
+- [ ] **评估是否把机器人资料目录也单独命名成 Canary 专用目录**：当前仍使用 `~/ChromeAutoBot`，后续如需更强隔离可再细分。
+
+---
+
 ### ✅ 最近完成
 
 #### 1. 飞书主链路稳定性加固
@@ -130,7 +261,7 @@ launchctl kickstart -k gui/$(id -u)/com.backlink.robot.daily
 #### 2. 调度与执行策略完成一轮重构
 - 日总控已支持“多站点按日目标补跑”，并按飞书状态表实时计算每站当天成功数。
 - 挑单优先级已改成 `未开始` 优先、`待重试` 靠后，避免旧失败任务长期抢占前排。
-- 浏览器连接策略已统一收口为只允许使用 `9222`，并默认关闭抢前台行为。
+- 浏览器连接策略已统一收口为只允许使用当前配置中的机器人端口，并默认关闭抢前台行为。
 - 目标站邮箱为空时会自动回退默认邮箱，避免必填 `Email` 导致的假失败。
 
 #### 3. 发帖成功判定与历史验真增强
@@ -349,9 +480,9 @@ launchctl kickstart -k gui/$(id -u)/com.backlink.robot.daily
 
 #### 7. Chrome DevTools MCP 已接入并验证
 - 已安装 `chrome-devtools-mcp`，同时保留两种模式：
-  - `chrome-devtools`：连接独立 `9222` 机器人 Chrome
+  - `chrome-devtools`：连接独立机器人浏览器（当前默认 `9666`）
   - `chrome-devtools-auto`：通过 `--autoConnect` 连接当前正在使用的 Chrome
-- `autoConnect` 已验证可以列出现有页签、开测试页，但稳定性仍弱于 `9222` 独立浏览器模式。
+- `autoConnect` 已验证可以列出现有页签、开测试页，但稳定性仍弱于独立机器人浏览器模式。
 
 ### 📊 今日关键结果
 

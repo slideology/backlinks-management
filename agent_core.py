@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
+from gemini_key_manager import get_active_key
 
 load_dotenv()
 
@@ -48,9 +49,12 @@ from agent_tools import TOOL_DECLARATIONS, dispatch_tool_call
 # =====================================================================
 
 AGENT_DEFAULTS = {
-    "model": "gemini-2.5-flash",              # 推荐使用 flash 平衡速度和成本
+    "model": "gemini-3.1-pro-preview",                # 单 Agent 主脑默认走更强规划模型
+    "fallback_model": "gemini-3-flash-preview",       # 主脑超时/握手异常时自动降级到更快模型
     "max_agent_rounds": 20,                    # Agent 最多循环多少轮（防止无限循环）
-    "request_timeout_seconds": 30,
+    "request_timeout_seconds": 60,
+    "retry_attempts": 2,
+    "retry_backoff_seconds": 2,
     "dry_run": False,                           # dry_run=True 时 Agent 只规划不执行
     "agent_log_dir": "artifacts/agent_logs",   # Agent 决策日志目录
 }
@@ -65,7 +69,7 @@ def _get_gemini_client(timeout: int = 30):
     from google import genai
     from google.genai import types
 
-    api_key = os.environ.get("GEMINI_API_KEY")
+    api_key = get_active_key()
     if not api_key:
         raise ValueError("环境变量 GEMINI_API_KEY 未配置！")
 
@@ -73,6 +77,39 @@ def _get_gemini_client(timeout: int = 30):
         api_key=api_key,
         http_options=types.HttpOptions(timeout=timeout),
     )
+
+
+def _generate_with_fallback(client, *, model: str, fallback_model: str, contents, system_prompt: str, tools, retry_attempts: int, retry_backoff_seconds: int):
+    from google.genai import types
+
+    models_to_try: list[str] = []
+    for candidate in [model, fallback_model]:
+        candidate = str(candidate or "").strip()
+        if candidate and candidate not in models_to_try:
+            models_to_try.append(candidate)
+
+    last_exc: Exception | None = None
+    for model_name in models_to_try:
+        for attempt in range(1, max(1, retry_attempts) + 1):
+            try:
+                return client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_prompt,
+                        tools=tools,
+                        temperature=0.1,
+                    ),
+                )
+            except Exception as exc:
+                last_exc = exc
+                print(f"  ⚠️ Agent 模型 {model_name} 第 {attempt}/{max(1, retry_attempts)} 次调用失败: {exc}")
+                if attempt < max(1, retry_attempts):
+                    time.sleep(max(0, retry_backoff_seconds))
+
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Agent 模型调用失败，且未捕获到具体异常")
 
 
 # =====================================================================
@@ -196,7 +233,10 @@ class BacklinkAgent:
 
         timeout = int(self._config.get("request_timeout_seconds", 30))
         max_rounds = int(self._config.get("max_agent_rounds", 20))
-        model = str(self._config.get("model", "gemini-2.5-flash"))
+        model = str(self._config.get("model", "gemini-3.1-pro-preview"))
+        fallback_model = str(self._config.get("fallback_model", "gemini-3-flash-preview"))
+        retry_attempts = int(self._config.get("retry_attempts", 2))
+        retry_backoff_seconds = int(self._config.get("retry_backoff_seconds", 2))
 
         try:
             client = _get_gemini_client(timeout)
@@ -213,8 +253,10 @@ class BacklinkAgent:
             types.Content(
                 role="user",
                 parts=[types.Part.from_text(
-                    "请开始今日的外链发布工作。先了解任务情况，然后自主完成所有站点的今日目标。"
-                    + ("（注意：当前是 DRY RUN 模式，请只规划不要调用实际发帖工具）" if self._dry_run else "")
+                    text=(
+                        "请开始今日的外链发布工作。先了解任务情况，然后自主完成所有站点的今日目标。"
+                        + ("（注意：当前是 DRY RUN 模式，请只规划不要调用实际发帖工具）" if self._dry_run else "")
+                    )
                 )],
             )
         ]
@@ -231,14 +273,15 @@ class BacklinkAgent:
             print(f"🔄 Agent 第 {round_idx} 轮思考中...")
 
             try:
-                response = client.models.generate_content(
+                response = _generate_with_fallback(
+                    client,
                     model=model,
+                    fallback_model=fallback_model,
                     contents=contents,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_prompt,
-                        tools=tools,
-                        temperature=0.1,   # 低温度 = 更确定性的决策
-                    ),
+                    system_prompt=system_prompt,
+                    tools=tools,
+                    retry_attempts=retry_attempts,
+                    retry_backoff_seconds=retry_backoff_seconds,
                 )
             except Exception as exc:
                 print(f"  ❌ Gemini API 调用失败: {exc}")

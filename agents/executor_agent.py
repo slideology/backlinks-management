@@ -21,7 +21,7 @@ import os
 import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from agents.base_agent import AgentMessage, BaseAgent
+from agents.base_agent import AgentMessage, BaseAgent, resolve_multi_agent_model
 
 
 class ExecutorAgent(BaseAgent):
@@ -36,7 +36,7 @@ class ExecutorAgent(BaseAgent):
         super().__init__(
             name="ExecutorAgent",
             role_description="发帖执行专员，负责浏览器操作，执行实际的外链发布任务",
-            model="gemini-2.0-flash",
+            model=resolve_multi_agent_model(config_path, "executor", "gemini-flash-lite-latest"),
             config_path=config_path,
         )
         self._memory = None
@@ -102,11 +102,15 @@ class ExecutorAgent(BaseAgent):
         memory = self._get_memory()
         for item in success_list:
             url = str(item.get("url", "") or "")
+            if item.get("memory_recorded"):
+                continue
             strategy = "vision" if item.get("used_vision") else "dom"
             memory.record_result(url, success=True, strategy=strategy, elapsed_seconds=elapsed / max(1, len(tasks_to_run)))
 
         for item in failed_list:
             url = str(item.get("url", "") or "")
+            if item.get("memory_recorded"):
+                continue
             category = str(item.get("diagnostic_category", "") or "")
             strategy = "vision" if item.get("used_vision") else "dom"
             memory.record_result(url, success=False, strategy=strategy, failure_reason=category)

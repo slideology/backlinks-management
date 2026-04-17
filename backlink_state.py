@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+from agent_memory import AgentMemory, normalize_failure_category
 from legacy_feishu_history import (
     DEFAULT_PROMOTED_SITE_MAP,
     LegacyFeishuHistoryStore,
@@ -17,8 +18,10 @@ from legacy_feishu_history import (
 
 
 DEFAULT_DAILY_SUCCESS_GOAL = 10
-DEFAULT_COOLDOWN_DAYS = 30
+DEFAULT_COOLDOWN_DAYS = 1
 DEFAULT_IN_PROGRESS_TIMEOUT_MINUTES = 15
+DEFAULT_AGENT_ASSIST_FAILURE_THRESHOLD = 2
+DEFAULT_SAME_DOMAIN_DAILY_LIMIT = 1
 DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
 LEGACY_SITE_KEY_ALIASES = {
     "b": "bearclicker.net",
@@ -33,6 +36,8 @@ STATUS_IN_PROGRESS = "进行中"
 STATUS_SUCCESS = "成功"
 STATUS_SKIPPED = "跳过"
 STATUS_ALL_DONE = "全部完成"
+EXECUTION_MODE_CLASSIC = "classic_dom"
+EXECUTION_MODE_AGENT = "agent_assisted"
 
 TARGET_SITE_HEADERS = [
     "站点标识",
@@ -53,22 +58,21 @@ STATUS_HEADERS = [
     "根域名",
     "页面评分",
     "目标站标识",
-    "目标网站",
     "状态",
     "最近成功时间",
     "最后尝试时间",
     "最近失败时间",
     "最近失败原因",
     "下次可发时间",
-    "成功链接",
     "当前评论内容",
-    "当前评论内容中文",
-    "当前锚文本",
-    "关键词",
     "链接格式",
     "来源类型",
     "有网址字段",
     "有验证码",
+    "执行模式",
+    "推荐策略",
+    "最近失败分类",
+    "域名冷却至",
     "最后更新时间",
 ]
 
@@ -78,30 +82,26 @@ SOURCE_MASTER_BASE_HEADERS = [
     "根域名",
     "页面评分",
     "当前应发站点",
-    "当前应发站点URL",
     "整体状态",
     "最近成功站点",
     "最近成功时间",
     "下次可推进时间",
     "最后失败原因",
+    "最后失败分类",
     "最后更新时间",
+    "当前执行模式",
+    "推荐策略",
+    "域名冷却至",
     "初始链接格式",
     "最终链接格式",
     "格式检测阶段",
     "格式检测证据",
     "格式检测置信度",
-    "是否视觉复核",
     "是否需要登录",
-    "登录探测证据",
     "是否支持Google登录",
-    "Google登录探测证据",
     "评论区是否存在",
-    "评论区探测证据",
     "历史外链验证结果",
-    "历史外链验证证据",
-    "历史审计时间",
     "历史审计状态",
-    "格式检测时间",
     "格式检测状态",
 ]
 
@@ -166,6 +166,98 @@ def parse_dt(value) -> Optional[datetime]:
 def iso_date(value) -> str:
     dt = parse_dt(value)
     return dt.strftime("%Y-%m-%d") if dt else ""
+
+
+def _load_agent_assist_runtime(config_path: str = "config.json") -> dict:
+    defaults = {
+        "same_domain_daily_limit": DEFAULT_SAME_DOMAIN_DAILY_LIMIT,
+    }
+    try:
+        payload = json.loads(Path(config_path).read_text(encoding="utf-8"))
+        return {**defaults, **payload.get("agent_assist", {})}
+    except Exception:
+        return defaults
+
+
+def _format_agent_dt(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return datetime.fromisoformat(text).strftime(DATETIME_FMT)
+    except Exception:
+        return text
+
+
+def _has_complex_editor_hint(source_url: str, row: dict, profile: dict) -> bool:
+    text = " | ".join(
+        [
+            str(source_url or "").lower(),
+            str(row.get("最近失败原因", "") or "").lower(),
+            str(row.get("链接格式", "") or "").lower(),
+            str(profile.get("best_strategy", "") or "").lower(),
+            str(profile.get("recent_failure_category", "") or "").lower(),
+        ]
+    )
+    return any(
+        marker in text
+        for marker in (
+            "blogger",
+            "blogspot",
+            "disqus",
+            "iframe",
+            "contenteditable",
+            "prosemirror",
+            "quill",
+            "ckeditor",
+            "draft",
+            "textarea_not_found",
+            "click_no_effect",
+            "editor_complex",
+        )
+    )
+
+
+def _recommended_strategy_for_row(row: dict, profile: dict) -> str:
+    recent_category = normalize_failure_category(
+        str(row.get("最近失败分类", "") or profile.get("recent_failure_category", "") or ""),
+        str(row.get("最近失败原因", "") or profile.get("recent_failure_reason", "") or ""),
+    )
+    best_strategy = str(profile.get("best_strategy", "") or "dom").strip().lower()
+    if best_strategy in {"dom", "vision", "sso"}:
+        return best_strategy
+    if recent_category == "editor_complex":
+        return "iframe"
+    if recent_category == "vision_unavailable":
+        return "dom"
+    if recent_category == "page_protected":
+        return "skip"
+    return "dom"
+
+
+def _execution_mode_for_row(source_url: str, row: dict, profile: dict) -> str:
+    recent_category = normalize_failure_category(
+        str(row.get("最近失败分类", "") or profile.get("recent_failure_category", "") or ""),
+        str(row.get("最近失败原因", "") or profile.get("recent_failure_reason", "") or ""),
+    )
+    if profile.get("blacklisted") or profile.get("temporarily_blacklisted"):
+        return EXECUTION_MODE_AGENT
+    if int(profile.get("consecutive_failures", 0) or 0) >= DEFAULT_AGENT_ASSIST_FAILURE_THRESHOLD:
+        return EXECUTION_MODE_AGENT
+    if recent_category in {
+        "network_timeout",
+        "page_protected",
+        "comment_unavailable",
+        "editor_complex",
+        "vision_unavailable",
+        "post_unverified",
+    }:
+        return EXECUTION_MODE_AGENT
+    if row.get("状态") == STATUS_PENDING_RETRY:
+        return EXECUTION_MODE_AGENT
+    if _has_complex_editor_hint(source_url, row, profile):
+        return EXECUTION_MODE_AGENT
+    return EXECUTION_MODE_CLASSIC
 
 
 def canonical_site_key(site_key: str = "", target_url: str = "", promoted_site_map: Optional[dict] = None) -> str:
@@ -471,7 +563,6 @@ def migrate_old_record_rows(old_rows: list[dict], target_rows: list[dict], promo
             "根域名": get_root_domain(source_url),
             "页面评分": "",
             "目标站标识": site_key,
-            "目标网站": target_url,
             "状态": normalize_status_label(row.get("状态", "")),
             "最近成功时间": str(extract_cell_text(row.get("执行时间", "")) or "").strip()
             if normalize_status_label(row.get("状态", "")) == STATUS_SUCCESS
@@ -482,15 +573,18 @@ def migrate_old_record_rows(old_rows: list[dict], target_rows: list[dict], promo
             else "",
             "最近失败原因": str(extract_cell_text(row.get("失败原因", "")) or "").strip(),
             "下次可发时间": "",
-            "成功链接": str(extract_cell_text(row.get("成功链接", "")) or "").strip(),
             "当前评论内容": str(extract_cell_text(row.get("评论内容", "")) or "").strip(),
-            "当前评论内容中文": str(extract_cell_text(row.get("评论内容中文", "")) or "").strip(),
-            "当前锚文本": "",
-            "关键词": "",
             "链接格式": str(extract_cell_text(row.get("链接格式", "")) or "").strip(),
             "来源类型": str(extract_cell_text(row.get("来源类型", "")) or "").strip(),
             "有网址字段": "",
             "有验证码": "",
+            "执行模式": EXECUTION_MODE_CLASSIC,
+            "推荐策略": "dom",
+            "最近失败分类": normalize_failure_category(
+                normalize_status_label(row.get("状态", "")),
+                str(extract_cell_text(row.get("失败原因", "")) or "").strip(),
+            ) if normalize_status_label(row.get("状态", "")) == STATUS_PENDING_RETRY else "",
+            "域名冷却至": "",
             "最后更新时间": str(extract_cell_text(row.get("最后更新时间", "")) or "").strip(),
         }
         pair_key = (source_url, site_key)
@@ -511,12 +605,13 @@ def reconcile_status_rows(
 ) -> list[dict]:
     current_time = now or datetime.now()
     target_order = sorted_target_rows(target_rows)
+    memory = AgentMemory()
     status_map = {}
     for row in existing_status_rows:
         source_url = normalize_source_url(extract_cell_url(row.get("来源链接", "")) or extract_cell_text(row.get("来源链接", "")))
         site_key = canonical_site_key(
             site_key=str(extract_cell_text(row.get("目标站标识", "")) or "").strip(),
-            target_url=normalize_target_url(row.get("目标网站", "")),
+            target_url="",
             promoted_site_map=promoted_site_map,
         )
         if source_url and site_key:
@@ -562,8 +657,34 @@ def reconcile_status_rows(
 
     rows = []
     for source_url, source_info in source_catalog.items():
-        prior_complete = True
-        prior_success_time = None
+        source_existing_rows = [
+            item
+            for (row_url, _site_key), item in status_map.items()
+            if row_url == source_url
+        ]
+        source_history_rows = [
+            item
+            for (row_url, _site_key), item in history_map.items()
+            if row_url == source_url
+        ]
+
+        def _latest_other_success_dt(current_site_key: str) -> Optional[datetime]:
+            latest: Optional[datetime] = None
+            for item in source_existing_rows:
+                if canonical_site_key(item.get("目标站标识", ""), "") == current_site_key:
+                    continue
+                status = normalize_status_label(item.get("状态", ""))
+                success_dt = parse_dt(item.get("最近成功时间", ""))
+                if status == STATUS_SUCCESS and success_dt and (latest is None or success_dt > latest):
+                    latest = success_dt
+            for item in source_history_rows:
+                if canonical_site_key(item.get("目标站标识", "")) == current_site_key:
+                    continue
+                success_dt = parse_dt(item.get("成功时间", ""))
+                if success_dt and (latest is None or success_dt > latest):
+                    latest = success_dt
+            return latest
+
         for target in target_order:
             runtime_target = target_runtime_payload(target)
             site_key = runtime_target["site_key"]
@@ -582,22 +703,21 @@ def reconcile_status_rows(
                 "根域名": source_info.get("根域名") or current.get("根域名", ""),
                 "页面评分": source_info.get("页面评分") or current.get("页面评分", ""),
                 "目标站标识": site_key,
-                "目标网站": runtime_target["url"],
                 "状态": normalize_status_label(current.get("状态", "")),
                 "最近成功时间": success_time,
                 "最后尝试时间": current.get("最后尝试时间", ""),
                 "最近失败时间": current.get("最近失败时间", ""),
                 "最近失败原因": current.get("最近失败原因", ""),
                 "下次可发时间": current.get("下次可发时间", ""),
-                "成功链接": current.get("成功链接", ""),
                 "当前评论内容": current.get("当前评论内容", ""),
-                "当前评论内容中文": current.get("当前评论内容中文", ""),
-                "当前锚文本": current.get("当前锚文本", ""),
-                "关键词": current.get("关键词", ""),
                 "链接格式": current.get("链接格式", ""),
                 "来源类型": current.get("来源类型", ""),
                 "有网址字段": current.get("有网址字段", ""),
                 "有验证码": current.get("有验证码", ""),
+                "执行模式": current.get("执行模式", ""),
+                "推荐策略": current.get("推荐策略", ""),
+                "最近失败分类": current.get("最近失败分类", ""),
+                "域名冷却至": current.get("域名冷却至", ""),
                 "最后更新时间": current.get("最后更新时间", ""),
             }
 
@@ -617,26 +737,33 @@ def reconcile_status_rows(
                 prior_success_time = parse_dt(success_time)
             elif status == STATUS_SKIPPED:
                 row["状态"] = STATUS_SKIPPED
-                prior_complete = True
             else:
-                if not prior_complete:
-                    row["状态"] = STATUS_BLOCKED
+                latest_other_success = _latest_other_success_dt(site_key)
+                if latest_other_success:
+                    cooldown_days = runtime_target["cooldown_days"] or DEFAULT_COOLDOWN_DAYS
+                    row["下次可发时间"] = (latest_other_success + timedelta(days=cooldown_days)).strftime(DATETIME_FMT)
+                next_allowed = parse_dt(row.get("下次可发时间", ""))
+                if next_allowed and next_allowed > current_time:
+                    row["状态"] = STATUS_COOLDOWN
+                elif status == STATUS_PENDING_RETRY:
+                    row["状态"] = STATUS_PENDING_RETRY
+                elif status == STATUS_IN_PROGRESS:
+                    row["状态"] = STATUS_IN_PROGRESS
                 else:
-                    if prior_success_time and not row["下次可发时间"]:
-                        cooldown_days = runtime_target["cooldown_days"] or DEFAULT_COOLDOWN_DAYS
-                        row["下次可发时间"] = (prior_success_time + timedelta(days=cooldown_days)).strftime(DATETIME_FMT)
-                    next_allowed = parse_dt(row.get("下次可发时间", ""))
-                    if next_allowed and next_allowed > current_time:
-                        row["状态"] = STATUS_COOLDOWN
-                    elif status == STATUS_PENDING_RETRY:
-                        row["状态"] = STATUS_PENDING_RETRY
-                    elif status == STATUS_IN_PROGRESS:
-                        row["状态"] = STATUS_IN_PROGRESS
-                    else:
-                        row["状态"] = STATUS_NOT_STARTED
-                prior_complete = row["状态"] in {STATUS_SUCCESS, STATUS_SKIPPED}
-                if prior_complete:
-                    prior_success_time = parse_dt(row.get("最近成功时间", ""))
+                    row["状态"] = STATUS_NOT_STARTED
+
+            profile = memory.get_site_profile(source_url)
+            row["最近失败分类"] = (
+                normalize_failure_category(
+                    row.get("最近失败分类", "") or profile.get("recent_failure_category", ""),
+                    row.get("最近失败原因", "") or profile.get("recent_failure_reason", ""),
+                )
+                if row.get("最近失败原因", "") or profile.get("recent_failure_category", "")
+                else ""
+            )
+            row["推荐策略"] = row.get("推荐策略", "") or _recommended_strategy_for_row(row, profile)
+            row["执行模式"] = _execution_mode_for_row(source_url, row, profile)
+            row["域名冷却至"] = _format_agent_dt(profile.get("cooldown_until", "")) or row.get("域名冷却至", "")
 
             rows.append(row)
 
@@ -668,6 +795,7 @@ def build_source_master_rows(
         current_row = None
         latest_success_row = None
         latest_failure_reason = ""
+        latest_failure_category = ""
         next_progress_at = ""
         for target in ordered_targets:
             site_key = str(target.get("站点标识", "") or "")
@@ -676,6 +804,8 @@ def build_source_master_rows(
                 continue
             if row.get("最近失败原因") and not latest_failure_reason:
                 latest_failure_reason = row["最近失败原因"]
+            if row.get("最近失败分类") and not latest_failure_category:
+                latest_failure_category = row["最近失败分类"]
             success_dt = parse_dt(row.get("最近成功时间", ""))
             if success_dt and (not latest_success_row or success_dt > parse_dt(latest_success_row.get("最近成功时间", ""))):
                 latest_success_row = row
@@ -693,30 +823,26 @@ def build_source_master_rows(
             "根域名": anchor_row.get("根域名", ""),
             "页面评分": anchor_row.get("页面评分", ""),
             "当前应发站点": current_row.get("目标站标识", "") if current_row else "",
-            "当前应发站点URL": current_row.get("目标网站", "") if current_row else "",
             "整体状态": STATUS_ALL_DONE if all_done else (current_row.get("状态", STATUS_NOT_STARTED) if current_row else STATUS_NOT_STARTED),
             "最近成功站点": latest_success_row.get("目标站标识", "") if latest_success_row else "",
             "最近成功时间": latest_success_row.get("最近成功时间", "") if latest_success_row else "",
             "下次可推进时间": next_progress_at,
             "最后失败原因": latest_failure_reason,
+            "最后失败分类": latest_failure_category,
             "最后更新时间": latest_update,
+            "当前执行模式": current_row.get("执行模式", "") if current_row else "",
+            "推荐策略": current_row.get("推荐策略", "") if current_row else "",
+            "域名冷却至": current_row.get("域名冷却至", "") if current_row else "",
             "初始链接格式": str(extract_cell_text(existing_probe.get("初始链接格式", "")) or ""),
             "最终链接格式": str(extract_cell_text(existing_probe.get("最终链接格式", "")) or ""),
             "格式检测阶段": str(extract_cell_text(existing_probe.get("格式检测阶段", "")) or ""),
             "格式检测证据": str(extract_cell_text(existing_probe.get("格式检测证据", "")) or ""),
             "格式检测置信度": str(extract_cell_text(existing_probe.get("格式检测置信度", "")) or ""),
-            "是否视觉复核": str(extract_cell_text(existing_probe.get("是否视觉复核", "")) or ""),
             "是否需要登录": str(extract_cell_text(existing_probe.get("是否需要登录", "")) or ""),
-            "登录探测证据": str(extract_cell_text(existing_probe.get("登录探测证据", "")) or ""),
             "是否支持Google登录": str(extract_cell_text(existing_probe.get("是否支持Google登录", "")) or ""),
-            "Google登录探测证据": str(extract_cell_text(existing_probe.get("Google登录探测证据", "")) or ""),
             "评论区是否存在": str(extract_cell_text(existing_probe.get("评论区是否存在", "")) or ""),
-            "评论区探测证据": str(extract_cell_text(existing_probe.get("评论区探测证据", "")) or ""),
             "历史外链验证结果": str(extract_cell_text(existing_probe.get("历史外链验证结果", "")) or ""),
-            "历史外链验证证据": str(extract_cell_text(existing_probe.get("历史外链验证证据", "")) or ""),
-            "历史审计时间": str(extract_cell_text(existing_probe.get("历史审计时间", "")) or ""),
             "历史审计状态": str(extract_cell_text(existing_probe.get("历史审计状态", "")) or ""),
-            "格式检测时间": str(extract_cell_text(existing_probe.get("格式检测时间", "")) or ""),
             "格式检测状态": str(extract_cell_text(existing_probe.get("格式检测状态", "")) or ""),
         }
         for target in ordered_targets:
@@ -736,16 +862,22 @@ def build_source_master_rows(
 def select_daily_tasks(status_rows: list[dict], target_rows: list[dict], now: Optional[datetime] = None) -> tuple[list[dict], list[dict], dict]:
     current_time = now or datetime.now()
     today = current_time.strftime("%Y-%m-%d")
+    assist_cfg = _load_agent_assist_runtime()
+    same_domain_daily_limit = max(0, int(assist_cfg.get("same_domain_daily_limit", DEFAULT_SAME_DOMAIN_DAILY_LIMIT) or 0))
     by_source = defaultdict(list)
     for row in status_rows:
         by_source[row["来源链接"]].append(row)
 
     selected_keys = set()
+    selected_domains = set()
     selected = []
     success_counts = defaultdict(int)
+    attempted_domains_today = set()
     for row in status_rows:
         if row["状态"] == STATUS_SUCCESS and iso_date(row.get("最近成功时间", "")) == today:
             success_counts[row["目标站标识"]] += 1
+        if same_domain_daily_limit > 0 and iso_date(row.get("最后尝试时间", "")) == today and row.get("根域名", ""):
+            attempted_domains_today.add(str(row.get("根域名", "")).strip().lower())
 
     for target in sorted_target_rows(target_rows, active_only=True):
         payload = target_runtime_payload(target)
@@ -754,10 +886,20 @@ def select_daily_tasks(status_rows: list[dict], target_rows: list[dict], now: Op
         if remaining <= 0:
             continue
 
-        prioritized = []
-        fresh = []
+        prioritized_not_started = []
+        fresh_not_started = []
+        prioritized_retry = []
+        fresh_retry = []
         for row in status_rows:
             if row["目标站标识"] != site_key or row["状态"] not in {STATUS_NOT_STARTED, STATUS_PENDING_RETRY}:
+                continue
+            cooldown_until = parse_dt(row.get("域名冷却至", ""))
+            if cooldown_until and cooldown_until > current_time:
+                continue
+            if (
+                row.get("执行模式") == EXECUTION_MODE_AGENT
+                and iso_date(row.get("最后尝试时间", "")) == today
+            ):
                 continue
             siblings = by_source[row["来源链接"]]
             other_success = any(
@@ -765,18 +907,34 @@ def select_daily_tasks(status_rows: list[dict], target_rows: list[dict], now: Op
                 for sibling in siblings
             )
             any_success = any(sibling["状态"] == STATUS_SUCCESS for sibling in siblings)
-            bucket = prioritized if other_success else fresh if not any_success else None
+            if row["状态"] == STATUS_NOT_STARTED:
+                bucket = prioritized_not_started if other_success else fresh_not_started if not any_success else None
+            else:
+                bucket = prioritized_retry if other_success else fresh_retry if not any_success else None
             if bucket is None:
                 continue
             bucket.append(row)
 
-        prioritized.sort(key=_candidate_sort_key)
-        fresh.sort(key=_candidate_sort_key)
-        for row in prioritized + fresh:
+        prioritized_not_started.sort(key=_candidate_sort_key)
+        fresh_not_started.sort(key=_candidate_sort_key)
+        prioritized_retry.sort(key=_candidate_sort_key)
+        fresh_retry.sort(key=_candidate_sort_key)
+        candidate_rows = (
+            prioritized_not_started
+            + fresh_not_started
+            + prioritized_retry
+            + fresh_retry
+        )
+        for row in candidate_rows:
             pair_key = (row["来源链接"], row["目标站标识"])
+            root_domain = str(row.get("根域名", "")).strip().lower()
             if pair_key in selected_keys:
                 continue
+            if same_domain_daily_limit > 0 and root_domain and (root_domain in attempted_domains_today or root_domain in selected_domains):
+                continue
             selected_keys.add(pair_key)
+            if same_domain_daily_limit > 0 and root_domain:
+                selected_domains.add(root_domain)
             row["状态"] = STATUS_IN_PROGRESS
             row["最后更新时间"] = current_time.strftime(DATETIME_FMT)
             selected.append(

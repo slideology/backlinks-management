@@ -17,6 +17,7 @@ def load_reporting_config(config_path: str = "config.json") -> dict:
         "state_file": "artifacts/reporting_workbook/state.json",
         "write_buffer_file": "artifacts/reporting_workbook/write_buffer.json",
         "flush_buffer_limit": 20,
+        "excluded_source_domains": [],
         "sheet_titles": {
             "sources": "来源主表",
             "records": "站点发布状态表",
@@ -419,6 +420,12 @@ class FeishuWorkbook:
             return normalized or str(extract_cell_text(value) or "").strip()
         return str(extract_cell_text(value) or value or "").strip()
 
+    @classmethod
+    def _normalize_compare_field(cls, field: str, value) -> str:
+        if field in {"来源链接", "目标网站", "成功链接"}:
+            return cls._normalize_key_field(field, value)
+        return str(extract_cell_text(value) or value or "").strip()
+
     def _upsert_sheet_dict_now(self, key: str, headers: list[str], key_fields: list[str], row: dict, max_rows: int = 50000) -> int:
         sheet_id = self.sheet_id(key)
         last_col = _column_letter(len(headers))
@@ -464,3 +471,102 @@ class FeishuWorkbook:
                 }
             )
             return 0
+
+    def _sync_sheet_dicts_now(
+        self,
+        key: str,
+        headers: list[str],
+        key_fields: list[str],
+        rows: list[dict],
+        max_rows: int = 50000,
+        prune_stale: bool = True,
+    ) -> int:
+        sheet_id = self.sheet_id(key)
+        last_col = _column_letter(len(headers))
+        existing_nonempty_rows = self.client.count_nonempty_rows(sheet_id, max_rows=max_rows)
+        row_limit = max(1, existing_nonempty_rows)
+        values = self.client.read_range(f"{sheet_id}!A1:{last_col}{row_limit}") if existing_nonempty_rows else []
+
+        if not values or [str(cell or "") for cell in values[0][: len(headers)]] != headers:
+            self.client.write_range(f"{sheet_id}!A1:{last_col}1", [headers])
+            values = [headers]
+            existing_nonempty_rows = 1
+
+        existing_rows_by_index: dict[int, dict] = {}
+        existing_index_by_key: dict[tuple, int] = {}
+        last_nonempty = 1
+
+        for offset, raw_row in enumerate(values[1:], start=2):
+            row_dict = {headers[i]: raw_row[i] if i < len(raw_row) else "" for i in range(len(headers))}
+            if any(str(extract_cell_text(cell) or cell or "").strip() for cell in raw_row):
+                last_nonempty = offset
+                existing_rows_by_index[offset] = row_dict
+                normalized_key = tuple(self._normalize_key_field(field, row_dict.get(field, "")) for field in key_fields)
+                if all(normalized_key):
+                    existing_index_by_key[normalized_key] = offset
+
+        blank_row = {header: "" for header in headers}
+        seen_existing_indices: set[int] = set()
+        next_row_index = last_nonempty + 1
+
+        for row in rows:
+            normalized_key = tuple(self._normalize_key_field(field, row.get(field, "")) for field in key_fields)
+            existing_row_index = existing_index_by_key.get(normalized_key)
+            if existing_row_index:
+                seen_existing_indices.add(existing_row_index)
+                existing_row = existing_rows_by_index.get(existing_row_index, {})
+                updates = {}
+                for header in headers:
+                    existing_value = self._normalize_compare_field(header, existing_row.get(header, ""))
+                    new_value = self._normalize_compare_field(header, row.get(header, ""))
+                    if existing_value != new_value:
+                        updates[header] = row.get(header, "")
+                if updates:
+                    self._write_sheet_partial_row_now(key, headers, existing_row_index, updates)
+                continue
+
+            self._write_sheet_row_now(key, headers, next_row_index, row)
+            next_row_index += 1
+
+        if prune_stale:
+            for row_index in sorted(existing_rows_by_index):
+                if row_index in seen_existing_indices:
+                    continue
+                self._write_sheet_row_now(key, headers, row_index, blank_row)
+
+        target_row_count = max(2, max(next_row_index - 1, len(rows) + 1))
+        try:
+            self.client.resize_sheet(
+                sheet_id,
+                row_count=target_row_count,
+                column_count=len(headers),
+                spreadsheet_token=self.spreadsheet_token,
+                as_user=True,
+                frozen_row_count=1,
+            )
+        except Exception as exc:
+            logger.warning("飞书 resize 失败，忽略并继续: %s", exc)
+
+        return len(rows) + 1
+
+    def sync_sheet_dicts(
+        self,
+        key: str,
+        headers: list[str],
+        key_fields: list[str],
+        rows: list[dict],
+        max_rows: int = 50000,
+        prune_stale: bool = True,
+    ) -> int:
+        try:
+            return self._sync_sheet_dicts_now(
+                key,
+                headers,
+                key_fields,
+                rows,
+                max_rows=max_rows,
+                prune_stale=prune_stale,
+            )
+        except Exception as exc:
+            logger.warning("飞书增量同步失败，回退整表覆盖: %s", exc)
+            return self.overwrite_sheet_dicts(key, headers, rows)

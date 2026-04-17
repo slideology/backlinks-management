@@ -16,6 +16,7 @@ from typing import Any, Optional
 from dotenv import load_dotenv
 from PIL import Image
 from playwright.sync_api import Page
+from gemini_key_manager import get_active_key
 
 load_dotenv()
 
@@ -48,6 +49,8 @@ COMMENT_FOCUS_SELECTORS = (
 VISION_DEFAULTS = {
     "enabled": True,
     "debug_dir": "artifacts/vision",
+    "model": "gemini-3-flash-preview",
+    "fallback_model": "gemini-2.5-flash",
     "request_timeout_seconds": 30,
     "retry_attempts": 2,
     "retry_backoff_seconds": 2,
@@ -75,7 +78,7 @@ def _get_gemini_client(config_path: str = "config.json"):
     from google import genai
     from google.genai import types
 
-    api_key = os.environ.get("GEMINI_API_KEY")
+    api_key = get_active_key()
     if not api_key:
         raise ValueError("环境变量 GEMINI_API_KEY 未配置，无法使用 Vision 模块！")
     config = load_vision_config(config_path)
@@ -301,17 +304,20 @@ def _generate_content_with_retry(client, model: str, contents: list[Any], config
     attempts = max(1, int(config.get("retry_attempts", 2) or 2))
     backoff = float(config.get("retry_backoff_seconds", 2) or 2)
     last_exc = None
-    for attempt in range(attempts):
-        try:
-            return client.models.generate_content(
-                model=model,
-                contents=contents,
-            )
-        except Exception as exc:
-            last_exc = exc
-            if attempt >= attempts - 1 or not _is_retryable_vision_error(exc):
-                raise
-            time.sleep(backoff * (attempt + 1))
+    model_candidates = [str(model or "").strip(), str(config.get("fallback_model", "") or "").strip()]
+    deduped_models = [item for idx, item in enumerate(model_candidates) if item and item not in model_candidates[:idx]]
+    for model_name in deduped_models:
+        for attempt in range(attempts):
+            try:
+                return client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                )
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= attempts - 1 or not _is_retryable_vision_error(exc):
+                    break
+                time.sleep(backoff * (attempt + 1))
     raise last_exc or RuntimeError("Vision generate_content 未返回结果。")
 
 
@@ -461,7 +467,7 @@ def _request_vision_analysis(page: Page, debug_dir: Path, stage: str, config_pat
 
         response = _generate_content_with_retry(
             client,
-            "gemini-2.5-flash",
+            str(config.get("model", "gemini-3-flash-preview") or "gemini-3-flash-preview"),
             [
                 types.Part.from_bytes(data=screenshot_bytes, mime_type=mime_type),
                 prompt,
@@ -555,7 +561,7 @@ def analyze_link_format_capability(page: Page, stage: str = "format-capability",
 
         response = _generate_content_with_retry(
             client,
-            "gemini-2.5-flash",
+            str(config.get("model", "gemini-3-flash-preview") or "gemini-3-flash-preview"),
             [
                 types.Part.from_bytes(data=screenshot_bytes, mime_type=mime_type),
                 prompt,

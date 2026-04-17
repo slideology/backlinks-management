@@ -1,23 +1,26 @@
 import os
 import json
 import re
+import time
+from typing import Optional
 from google import genai
+from google.genai import types
 from dotenv import load_dotenv
+from gemini_key_manager import get_active_key
 
 # 加载环境变量
 load_dotenv()
 
-# 获取 API Key
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-if not GEMINI_API_KEY:
-    raise ValueError("未在 .env 中找到 GEMINI_API_KEY")
-
-# 初始化新的 GenAI 客户端
-client = genai.Client(api_key=GEMINI_API_KEY)
-
-# 推荐的新版模型标识符
-MODEL_ID = 'gemini-flash-latest'
+# 生产环境默认使用固定型号，避免 latest 别名漂移
+MODEL_ID = "gemini-3-flash-preview"
+AI_DEFAULTS = {
+    "request_timeout_seconds": 20,
+    "retry_attempts": 3,
+    "retry_backoff_seconds": 2,
+    "model": MODEL_ID,
+    "fallback_model": "gemini-flash-lite-latest",
+}
+_CLIENT_CACHE = {}
 
 
 def _extract_json_payload(text: str):
@@ -40,6 +43,94 @@ def _extract_json_payload(text: str):
             continue
     return None
 
+
+def _load_ai_config(config_path: str = "config.json") -> dict:
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        return {**AI_DEFAULTS, **config.get("ai_generation", {})}
+    except Exception:
+        return dict(AI_DEFAULTS)
+
+
+def _get_client(config_path: str = "config.json"):
+    config = _load_ai_config(config_path)
+    timeout = int(config.get("request_timeout_seconds", AI_DEFAULTS["request_timeout_seconds"]) or AI_DEFAULTS["request_timeout_seconds"])
+    gemini_api_key = get_active_key()
+    if not gemini_api_key:
+        raise ValueError("未在 .env 中找到可用的 GEMINI_API_KEY")
+    cache_key = (gemini_api_key, timeout)
+    cached = _CLIENT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    client = genai.Client(
+        api_key=gemini_api_key,
+        http_options=types.HttpOptions(
+            timeout=timeout,
+            retry_options=types.HttpRetryOptions(attempts=1),
+        ),
+    )
+    _CLIENT_CACHE[cache_key] = client
+    return client
+
+
+def _is_retryable_ai_error(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    return any(
+        marker in message
+        for marker in (
+            "timed out",
+            "timeout",
+            "deadline exceeded",
+            "connection reset",
+            "temporarily unavailable",
+            "service unavailable",
+            "unavailable",
+            "429",
+            "500",
+            "502",
+            "503",
+            "504",
+        )
+    )
+
+
+def _model_candidates(explicit_model: Optional[str], config: dict) -> list[str]:
+    candidates = [
+        explicit_model or str(config.get("model", MODEL_ID) or MODEL_ID),
+        str(config.get("fallback_model", "") or "").strip(),
+    ]
+    deduped = []
+    for item in candidates:
+        if item and item not in deduped:
+            deduped.append(item)
+    return deduped or [MODEL_ID]
+
+
+def _generate_content(contents, model: Optional[str] = None, config_path: str = "config.json"):
+    config = _load_ai_config(config_path)
+    client = _get_client(config_path)
+    attempts = max(1, int(config.get("retry_attempts", AI_DEFAULTS["retry_attempts"]) or AI_DEFAULTS["retry_attempts"]))
+    backoff = float(config.get("retry_backoff_seconds", AI_DEFAULTS["retry_backoff_seconds"]) or AI_DEFAULTS["retry_backoff_seconds"])
+    last_exc = None
+
+    for model_name in _model_candidates(model, config):
+        for attempt in range(attempts):
+            try:
+                return client.models.generate_content(model=model_name, contents=contents)
+            except Exception as exc:
+                last_exc = exc
+                retryable = _is_retryable_ai_error(exc)
+                if attempt < attempts - 1 and retryable:
+                    time.sleep(backoff * (attempt + 1))
+                    continue
+                if not retryable:
+                    raise
+                break
+
+    raise last_exc or RuntimeError("Gemini generate_content 未返回结果。")
+
 def analyze_keywords(target_url, site_content=""):
     """
     根据目标推广网站的 URL 或内容，分析出适合发外链用的 SEO 关键词
@@ -52,10 +143,7 @@ def analyze_keywords(target_url, site_content=""):
     如果有网站参考内容：{site_content[:1000]}
     """
     try:
-        response = client.models.generate_content(
-            model=MODEL_ID,
-            contents=prompt
-        )
+        response = _generate_content(prompt, model=MODEL_ID)
         return response.text.strip()
     except Exception as e:
         print(f"❌ Gemini 分析关键词失败: {e}")
@@ -81,10 +169,7 @@ def generate_anchor_text(keywords, link_format, target_url):
     例如 plain_text_autolink / plain_text / url_field: 无法嵌入超链接，直接返回 "{target_url}" 即可。
     """
     try:
-        response = client.models.generate_content(
-            model=MODEL_ID,
-            contents=prompt
-        )
+        response = _generate_content(prompt, model=MODEL_ID)
         return response.text.strip()
     except Exception as e:
         print(f"❌ Gemini 生成锚文本失败: {e}")
@@ -106,10 +191,7 @@ def generate_comment(anchor_text, forum_topic=""):
     3. 只需返回评论内容本身，不要返回其他的解释说明。
     """
     try:
-        response = client.models.generate_content(
-            model=MODEL_ID,
-            contents=prompt
-        )
+        response = _generate_content(prompt, model=MODEL_ID)
         return response.text.strip()
     except Exception as e:
         print(f"❌ Gemini 生成评论失败: {e}")
@@ -128,11 +210,15 @@ def translate_content_fields(fields: dict, target_language_name: str) -> dict:
 输入 JSON：
 {json.dumps(fields, ensure_ascii=False, indent=2)}
 """
-    response = client.models.generate_content(model=MODEL_ID, contents=prompt)
-    payload = _extract_json_payload(getattr(response, "text", ""))
-    if not payload:
-        raise RuntimeError("Gemini 未返回可解析的多语言翻译 JSON。")
-    return {key: str(payload.get(key, value)) for key, value in fields.items()}
+    try:
+        response = _generate_content(prompt, model=MODEL_ID)
+        payload = _extract_json_payload(getattr(response, "text", ""))
+        if not payload:
+            raise RuntimeError("Gemini 未返回可解析的多语言翻译 JSON。")
+        return {key: str(payload.get(key, value)) for key, value in fields.items()}
+    except Exception as e:
+        print(f"❌ Gemini 翻译内容失败: {e}")
+        return {key: str(value) for key, value in fields.items()}
 
 
 def translate_comment_to_chinese(comment_content: str) -> str:
@@ -155,8 +241,12 @@ def summarize_comment_discussion(comments_raw: list[str], target_language_name: 
 评论列表：
 {json.dumps(trimmed_comments, ensure_ascii=False, indent=2)}
 """
-    response = client.models.generate_content(model=MODEL_ID, contents=prompt)
-    return getattr(response, "text", "").strip()
+    try:
+        response = _generate_content(prompt, model=MODEL_ID)
+        return getattr(response, "text", "").strip()
+    except Exception as e:
+        print(f"❌ Gemini 评论区摘要失败: {e}")
+        return ""
 
 
 def load_active_target(targets_path="targets.json"):
@@ -233,17 +323,22 @@ def generate_comment_for_target(target: dict, link_format: str = "markdown", for
 1. 语气像真人，不要太商业化
 2. 只返回评论内容，不要加任何解释
 3. 如果链接格式是 plain_text / plain_text_autolink / url_field，则必须把裸 URL 自然地放进句子里，不能改成 HTML、Markdown 或 BBCode。
-4. 锚文本部分必须原封不动地保留：{anchor_code}
+    4. 锚文本部分必须原封不动地保留：{anchor_code}
 """
     try:
-        response = client.models.generate_content(model=MODEL_ID, contents=prompt)
+        response = _generate_content(prompt, model=MODEL_ID)
         return response.text.strip()
     except Exception as e:
         print(f"❌ Gemini 生成评论失败: {e}")
         return f"Really enjoyed this article, thanks for sharing! Check out {anchor_code} too."
 
 
-def generate_localized_bundle_for_target(target: dict, link_format: str, page_context: dict) -> dict:
+def generate_localized_bundle_for_target(
+    target: dict,
+    link_format: str,
+    page_context: dict,
+    include_chinese_translation: bool = True,
+) -> dict:
     target_url = target.get("url", "")
     target_description = target.get("description", "")
     anchor_seed = target.get("anchor_text", "click here")
@@ -287,10 +382,10 @@ def generate_localized_bundle_for_target(target: dict, link_format: str, page_co
 3. anchor_text 必须是自然短句，不要只输出裸链接；如果格式是 url_field、plain_text 或 plain_text_autolink，则直接返回 URL。
 4. comment_content 中必须原封不动包含 anchor_text。
 5. comment_content_zh 必须忠实翻译 comment_content。
-6. 除 JSON 外不要输出任何解释。
+    6. 除 JSON 外不要输出任何解释。
 """
     try:
-        response = client.models.generate_content(model=MODEL_ID, contents=prompt)
+        response = _generate_content(prompt, model=MODEL_ID)
         payload = _extract_json_payload(getattr(response, "text", ""))
         if not payload:
             raise RuntimeError("Gemini 未返回可解析的多语言内容 JSON。")
@@ -304,7 +399,9 @@ def generate_localized_bundle_for_target(target: dict, link_format: str, page_co
         if anchor_text not in comment_content:
             comment_content = f"{comment_content.rstrip()} {anchor_text}".strip()
         comment_content_zh = str(payload.get("comment_content_zh", "")).strip()
-        if not comment_content_zh:
+        if not include_chinese_translation:
+            comment_content_zh = ""
+        elif not comment_content_zh:
             comment_content_zh = translate_comment_to_chinese(comment_content)
         return {
             "language_code": str(payload.get("language_code", page_context.get("language_code", "en"))),
@@ -324,7 +421,7 @@ def generate_localized_bundle_for_target(target: dict, link_format: str, page_co
             "keywords": anchor_seed,
             "anchor_text": anchor_text,
             "comment_content": comment_content,
-            "comment_content_zh": translate_comment_to_chinese(comment_content),
+            "comment_content_zh": translate_comment_to_chinese(comment_content) if include_chinese_translation else "",
         }
 
 

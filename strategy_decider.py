@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from dotenv import load_dotenv
+from gemini_key_manager import get_active_key
 
 load_dotenv()
 
@@ -54,7 +55,7 @@ STRATEGY_MARK_BLACKLIST = "mark_blacklist"
 # 决策器默认配置
 DECIDER_DEFAULTS = {
     "enabled": True,
-    "model": "gemini-2.0-flash",        # 使用快速模型降低延迟和成本
+    "model": "gemini-flash-lite-latest",     # 策略路由优先走轻量模型
     "request_timeout_seconds": 15,
     "debug_dir": "artifacts/strategy_decider",
     "confidence_threshold": 0.6,         # 置信度低于此值时回退到规则决策
@@ -146,7 +147,7 @@ def _get_gemini_client_for_decider(config: dict):
     from google import genai
     from google.genai import types
 
-    api_key = os.environ.get("GEMINI_API_KEY")
+    api_key = get_active_key()
     if not api_key:
         raise ValueError("环境变量 GEMINI_API_KEY 未配置，无法使用策略决策器！")
 
@@ -247,7 +248,7 @@ def _ai_decide(
         client = _get_gemini_client_for_decider(config)
         from google.genai import types
 
-        model = str(config.get("model", "gemini-2.0-flash") or "gemini-2.0-flash")
+        model = str(config.get("model", "gemini-flash-lite-latest") or "gemini-flash-lite-latest")
 
         # 根据是否有 SSO 配置决定可用策略
         available_strategies = [
