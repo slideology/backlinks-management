@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock
 
+from backlink_state import STATUS_HEADERS
 from feishu_workbook import FeishuWorkbook
 
 
@@ -80,6 +81,36 @@ class FeishuWorkbookTests(unittest.TestCase):
                 "sheet_1!A2:C2",
                 [["https://example.com/post", "bearclicker.net", "待重试"]],
             )
+
+    def test_upsert_status_row_uses_records_sheet_defaults(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            client = Mock()
+            client.spreadsheet_token = "sheet"
+            client.read_range.return_value = [STATUS_HEADERS]
+            workbook = FeishuWorkbook(
+                client=client,
+                config={"write_buffer_file": f"{tmpdir}/buffer.json"},
+                spreadsheet_token="sheet",
+                sheet_ids={"records": "sheet_1"},
+                spreadsheet_url="",
+            )
+
+            row_index = workbook.upsert_status_row(
+                {
+                    "来源链接": "https://example.com/post",
+                    "目标站标识": "bearclicker.net",
+                    "状态": "待重试",
+                }
+            )
+
+            self.assertEqual(row_index, 2)
+            client.write_range.assert_called_once()
+            write_range_call = client.write_range.call_args[0]
+            self.assertEqual(write_range_call[0], "sheet_1!A2:U2")
+            written_row = write_range_call[1][0]
+            self.assertEqual(written_row[0], "https://example.com/post")
+            self.assertEqual(written_row[4], "bearclicker.net")
+            self.assertEqual(written_row[5], "待重试")
 
 
 if __name__ == "__main__":

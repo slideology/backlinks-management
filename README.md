@@ -1,6 +1,6 @@
 # AI 驱动的外链自动发布与管理系统 (Backlink Management System)
 
-本项目旨在通过 AI 内容生成 (Gemini) 和本地浏览器自动化操作 (Playwright) 以及 Google Sheets 协同，搭建一套半/全自动化的 SEO 外链分发管理系统。
+本项目旨在通过 AI 内容生成 (Gemini)、本地浏览器自动化操作 (Playwright) 以及飞书运营总表协同，搭建一套半/全自动化的 SEO 外链分发管理系统。
 
 ---
 
@@ -36,18 +36,20 @@
 
 ## ⏰ 每日自动运行
 
-项目现在已经支持 **macOS `launchd` 每天 10:15 自动启动**。
+项目现在已经支持 **macOS `launchd` 按北京时间两个固定窗口自动运行**。
 
 - 定时任务入口：[/Users/dahuang/Library/LaunchAgents/com.backlink.robot.daily.plist](/Users/dahuang/Library/LaunchAgents/com.backlink.robot.daily.plist)
 - 安装脚本：[/Users/dahuang/CascadeProjects/test/backlink-management/scripts/install_launch_agent.sh](/Users/dahuang/CascadeProjects/test/backlink-management/scripts/install_launch_agent.sh)
 - 自动运行日志目录：[/Users/dahuang/CascadeProjects/test/backlink-management/logs](/Users/dahuang/CascadeProjects/test/backlink-management/logs)
 
 当前自动运行策略是：
-- 每天本地时间 **10:15** 自动执行 `Start_Robot.command`
+- 北京时间 **08:00-10:00** 运行第一窗口
+- 若当天任务未完成，北京时间 **12:00-14:00** 运行第二窗口
+- `launchd` 会在 **08:00** 和 **12:00** 各触发一次 `Start_Robot.command`
+- `daily_run_orchestrator.py` 内部会再次校验运行窗口，到点后主动收尾退出
 - 自动模式下会跳过首次登录确认提示，不会卡在终端等待输入
 - 调度器会按“**今天还差多少成功数**”动态补任务池，而不是只拿固定 1 条
-- 发帖主程序会在“**当天成功 10 条**”后自动停止
-- 每日总控结束后会自动刷新一份飞书中文运营总表，供人工查看来源、评论、目标站和历史去重信息
+- 每日总控结束后会自动刷新飞书中文运营总表，供人工查看来源、评论、目标站和历史去重信息
 
 如果你想立刻手动触发一次，不等到第二天 10 点，可以执行：
 
@@ -56,6 +58,89 @@ launchctl kickstart -k gui/$(id -u)/com.backlink.robot.daily
 ```
 
 首次正式自动运行前，建议先手动启动一次机器人 Chrome，确认专用发帖账号已经登录。
+
+---
+
+## 📅 2026-04-24 最近工作摘要
+
+### ✅ 这轮已经落地的改动
+
+#### 1. 正式发帖窗口改成北京时间双时段
+- 自动任务从原来的单次触发，改成：
+  - `08:00-10:00`
+  - `12:00-14:00`
+- `launchd` 和总控内部都做了双重限制，避免任务跨时段长挂不退。
+
+#### 2. 机器人浏览器链路稳定到 `Chrome Canary + 9666`
+- 正式发帖统一走：
+  - `Google Chrome Canary`
+  - `http://127.0.0.1:9666`
+  - 专用 profile：`/Users/dahuang/ChromeCanaryAutoBot9666`
+- 默认后台启动、自动隐藏，且 `bring_to_front = false`，减少打扰当前桌面。
+
+#### 3. 正式发帖加了更硬的止损
+- `Start_Robot.command` 增加 watchdog：
+  - 默认 **5 分钟无日志进展自动终止**
+  - 同时发送飞书异常通知
+- 单条任务改成子进程隔离，避免一条坏链接把整轮拖死。
+
+#### 4. 页面探测与正式发帖已经拆成两条链
+- 新增统一探测入口：
+  - [/Users/dahuang/CascadeProjects/test/backlink-management/source_probe_audit.py](/Users/dahuang/CascadeProjects/test/backlink-management/source_probe_audit.py)
+- 来源主表新增最小状态层：
+  - `页面探测状态`
+  - `页面探测时间`
+  - `是否值得发帖`
+  - `页面探测失败原因`
+- 正式调度改成“混合门控”：
+  - 优先消费 `已探测通过 + 值得发帖=是`
+  - 不够再补未探测来源
+
+#### 5. 批量探测链路补了单页面超时与断点续跑
+- 单页面探测改成子进程执行，超时后自动回收继续下一条。
+- 误开的辅助页面（如 `akismet.com/privacy/`、`blogger.com/comment/fullpage/...`）已加入点击保护，不再反复跑偏。
+- 当前这一轮批量探测已完成全量扫描：
+  - `total_scanned = 1522`
+  - `completed = 1078`
+  - `failed = 444`
+  - `worth_posting=是 = 205`
+  - `worth_posting=待确认 = 525`
+  - `worth_posting=否 = 792`
+
+#### 6. 来源池继续瘦身
+- 已清理 5 条明显低价值工具站来源：
+  - `connections.gg`
+  - `numberle.org`
+  - `octordly.com`
+  - `quordly.com`
+  - `spellbee.org`
+- 已对 `amdm.ru/qa/post/<id>` 这类镜像来源做去重：
+  - 每个唯一 `post id` 只保留 1 条
+  - 从 `56` 条来源压缩到 `6` 条
+
+#### 7. 正式成功判定收紧
+- 已去掉“**普通 URL 变化就算成功**”的规则
+- 现在只保留更稳的成功信号：
+  - 评论内容出现
+  - 审核/成功提示词
+  - 评论区出现目标域名或锚文本
+  - 明确跳到 `#comment`
+  - 输入框消失 / 提交按钮 disabled 等提交副作用
+
+#### 8. Gemini 链路的当前判断
+- 已验证当前激活 key `hyny52011` 本身可用，最小请求正常。
+- 也验证了 `gemini-3-flash-preview`、`gemini-3.1-flash-lite-preview` 都能通过最小/中等请求。
+- 但真实正式链路上，主要瓶颈仍然是：
+  - 文案生成 prompt 偏重，容易 `timed out`
+  - 失败后进入 Vision，再次 `timed out`
+- 当前配置里，文案主模型已经切到：
+  - `gemini-3.1-flash-lite-preview`
+
+### 📌 当前最值得继续优化的点
+
+- 继续把正式文案生成降到“最小英文评论优先”，减少 Gemini 超时。
+- 压飞书 `90217 too many request`，减少状态写回抖动。
+- 基于批量探测结果，把明显不可发来源继续清理出正式待发池。
 
 ---
 
@@ -477,6 +562,75 @@ launchctl kickstart -k gui/$(id -u)/com.backlink.robot.daily
 #### 6. 真实链路验证
 - 真实浏览器跑通了至少 1 条新外链任务，Google / 飞书两边都已完成回写。
 - Vision 留痕、飞书写入、中文翻译列、`Link_Format` 回填都已实测走通。
+
+## 📅 2026-04-20 / 2026-04-21 最近工作摘要
+
+### ✅ 本轮已完成
+
+#### 1. 机器人浏览器链路继续固定在 `Chrome Canary + 9666`
+- 机器人仍优先使用 `Google Chrome Canary`
+- CDP 端口继续固定为 `9666`
+- 自用 `Google Chrome` 与机器人浏览器保持分离，减少误抢前台与端口混用
+
+#### 2. 修复了“旧任务卡死后挡住第二天定时任务”的核心问题
+- 之前 `launchd` 在第二天 `10:15` 没有真正起新任务，不是因为定时器坏了
+- 真正原因是：前一天的 `Start_Robot.command / daily_run_orchestrator.py` 卡死但未退出，`launchd` 认为任务仍在运行
+- 现已在 [Start_Robot.command](/Users/dahuang/CascadeProjects/test/backlink-management/Start_Robot.command) 增加外层 watchdog 守护
+
+#### 3. 增加了“5 分钟无进展自动退出 + 飞书异常提醒”
+- 新增配置：
+  - `watchdog.no_progress_timeout_seconds = 300`
+  - `watchdog.poll_interval_seconds = 15`
+- watchdog 监控 `launchd.stdout.log` 的最后更新时间
+- 超过 `5` 分钟无新日志进展时：
+  - 自动终止 `daily_run_orchestrator.py`
+  - 自动发送飞书异常提醒
+- 如果 `daily_run_orchestrator.py` 非零退出，也会发送飞书异常提醒
+
+#### 4. 修复了飞书状态回写兼容问题
+- [feishu_workbook.py](/Users/dahuang/CascadeProjects/test/backlink-management/feishu_workbook.py) 补回了兼容方法 `upsert_status_row()`
+- 修掉了预探测提前收口时反复出现的异常：
+  - `'FeishuWorkbook' object has no attribute 'upsert_status_row'`
+
+#### 5. 增加单条任务止损，避免整轮被一条页面拖死
+- [form_automation_local.py](/Users/dahuang/CascadeProjects/test/backlink-management/form_automation_local.py) 增加单条任务超时守卫
+- 新配置：
+  - `execution.single_task_timeout_seconds = 180`
+- 目标是让单条任务超时先在执行层回退，不要总靠最外层 watchdog 收尸
+
+#### 6. 兼容性修复与验证
+- 修复了 watchdog 初版里对旧版 Bash 不兼容的 `${var@Q}` 用法
+- 改为通过环境变量传参给 Python 发送飞书异常提醒
+- 验证通过：
+  - `bash -n Start_Robot.command`
+  - `tests/test_webhook_sender.py`
+  - `tests/test_feishu_workbook.py`
+  - `tests/test_form_automation_local.py`
+
+### 📊 当前状态判断
+
+- `2026-04-21` 这轮任务已经能重新启动，不再是“根本没触发”
+- watchdog 已经实际生效，并成功发出过飞书异常提醒
+- 当前主要卡点不是调度器，而是：
+  - 某些页面在**预探测阶段**就可能长时间挂住
+  - 典型现象：日志停在 `[1/4] 先做页面预探测...`
+  - 超过 `5` 分钟后被 watchdog 终止
+
+### ⚠️ 仍待继续处理
+
+#### 高优先级
+- [ ] **把“页面预探测”也纳入更细粒度的超时控制**：当前单条任务超时守卫还不够彻底，预探测阶段仍可能把整轮拖到 watchdog 触发
+- [ ] **对明显卡死页做域名级跳过/冷却**：像 `blog.pinkyparadise.com` 这种卡在预探测阶段的站点，应尽快加更强的域名级止损
+- [ ] **清理日志中的历史噪声**：`launchd.stderr.log` 里还混有旧的扩展 service worker 崩溃记录，容易误导排查
+
+#### 中优先级
+- [ ] **把 watchdog 触发原因写入飞书状态表或本地审计文件**：便于后续统计“异常终止”的真实分布
+- [ ] **继续减少 Gemini 前置调用**：虽然已经先预探测再生成，但仍有不少页面在 AI 阶段耗时明显
+
+#### 低优先级
+- [ ] **为异常通知补更清晰的上下文**：例如当前处理 URL、站点标识、轮次、是否命中 Vision 熔断
+
+---
 
 #### 7. Chrome DevTools MCP 已接入并验证
 - 已安装 `chrome-devtools-mcp`，同时保留两种模式：

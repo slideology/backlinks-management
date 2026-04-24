@@ -1,21 +1,27 @@
 import unittest
 from unittest.mock import patch
+import time
 
 from browser_cdp import ensure_allowed_cdp_url, merge_browser_config
 from form_automation_local import (
     DEFAULT_CONTACT_EMAIL,
     _build_task_failure_updates,
+    _detect_submission_side_effect,
     _detect_hard_blocker,
     _frame_scan_priority,
     _is_blogger_comment_url,
     _is_irrelevant_frame_url,
+    _normalize_target_value,
     _preprobe_page_for_generation,
     _is_submission_context_reset_error,
     _page_has_comment_signals,
+    _should_click_reveal_candidate,
     _target_presence_tokens,
     _should_use_vision_fallback,
     _verify_post_success,
+    load_runtime_config,
     resolve_runtime_link_format,
+    task_timeout_guard,
 )
 
 
@@ -123,6 +129,14 @@ class FormAutomationLocalTests(unittest.TestCase):
         self.assertEqual(updates["推荐策略"], "dom")
         self.assertEqual(updates["最近失败分类"], "other_failure")
 
+    def test_normalize_target_value_extracts_plain_text(self):
+        value = [{"link": "mailto:slideology0816@gmail.com", "text": "slideology0816@gmail.com", "type": "url"}]
+        self.assertEqual(_normalize_target_value(value), "slideology0816@gmail.com")
+
+    def test_normalize_target_value_extracts_url(self):
+        value = [{"link": "https://bearclicker.net/", "text": "https://bearclicker.net/", "type": "url"}]
+        self.assertEqual(_normalize_target_value(value, is_url=True), "https://bearclicker.net/")
+
     def test_is_blogger_comment_url_matches_blogger_frame(self):
         self.assertTrue(_is_blogger_comment_url("https://www.blogger.com/comment/frame/123"))
         self.assertTrue(_is_blogger_comment_url("https://www.blogblog.com/comment/frame/123"))
@@ -131,6 +145,36 @@ class FormAutomationLocalTests(unittest.TestCase):
     def test_is_irrelevant_frame_url_filters_ad_iframes(self):
         self.assertTrue(_is_irrelevant_frame_url("https://pagead2.googlesyndication.com/pagead/s/cookie_push_only.html"))
         self.assertFalse(_is_irrelevant_frame_url("https://www.blogger.com/comment/frame/123"))
+
+    def test_should_click_reveal_candidate_skips_akismet_privacy_link(self):
+        self.assertFalse(
+            _should_click_reveal_candidate(
+                current_url="https://example.com/post",
+                tag_name="a",
+                href="https://akismet.com/privacy/",
+                text="Learn how your comment data is processed.",
+            )
+        )
+
+    def test_should_click_reveal_candidate_allows_same_page_comment_anchor(self):
+        self.assertTrue(
+            _should_click_reveal_candidate(
+                current_url="https://example.com/post",
+                tag_name="a",
+                href="#respond",
+                text="Leave a Reply",
+            )
+        )
+
+    def test_should_click_reveal_candidate_skips_blogger_fullpage_comment_link(self):
+        self.assertFalse(
+            _should_click_reveal_candidate(
+                current_url="https://www.blogger.com/comment/frame/123?po=456",
+                tag_name="a",
+                href="https://www.blogger.com/comment/fullpage/post/7443561198158329034/3012924679987212222",
+                text="Comment",
+            )
+        )
 
     def test_frame_scan_priority_prefers_comment_frames(self):
         class FakeFrame:
@@ -281,6 +325,28 @@ class FormAutomationLocalTests(unittest.TestCase):
         self.assertIn("提交后页面中已看不到原评论输入框", msg)
         mock_side_effect.assert_called_once()
 
+    def test_detect_submission_side_effect_does_not_treat_url_change_as_success(self):
+        class FakeLocator:
+            def count(self):
+                return 1
+
+            def first(self):
+                return self
+
+            def get_attribute(self, _name):
+                return None
+
+        class FakePage:
+            url = "https://example.com/login"
+
+            def __init__(self):
+                self._original_url = "https://example.com/post"
+
+            def locator(self, _selector):
+                return FakeLocator()
+
+        self.assertEqual(_detect_submission_side_effect(FakePage()), "")
+
     @patch("form_automation_local._detect_submission_side_effect", return_value="")
     def test_verify_post_success_accepts_reset_error_as_probable_success(self, mock_side_effect):
         class ExplodingBody:
@@ -336,6 +402,31 @@ class FormAutomationLocalTests(unittest.TestCase):
         self.assertIn("评论区链接中出现目标标识", msg)
         mock_target_presence.assert_called_once()
 
+    @patch("form_automation_local._detect_submission_side_effect", return_value="")
+    def test_verify_post_success_accepts_comment_anchor_redirect(self, mock_side_effect):
+        class FakeBody:
+            def all_inner_texts(self):
+                return [""]
+
+        class FakePage:
+            url = "https://example.com/post#comment-123"
+
+            def __init__(self):
+                self._original_url = "https://example.com/post"
+
+            def wait_for_timeout(self, _ms):
+                return None
+
+            def locator(self, selector):
+                if selector == "body":
+                    return FakeBody()
+                raise AssertionError(f"unexpected selector: {selector}")
+
+        ok, msg = _verify_post_success(FakePage(), "hello world")
+        self.assertTrue(ok)
+        self.assertIn("评论锚点", msg)
+        mock_side_effect.assert_not_called()
+
     @patch("form_automation_local._LINK_FORMAT_DETECTOR")
     def test_resolve_runtime_link_format_defaults_blogspot_to_html(self, mock_detector):
         mock_detector.analyze_website.return_value = {
@@ -376,6 +467,18 @@ class FormAutomationLocalTests(unittest.TestCase):
         browser_cfg = merge_browser_config({"allow_only_cdp_url": "http://127.0.0.1:9666"})
         with self.assertRaises(RuntimeError):
             ensure_allowed_cdp_url("http://127.0.0.1:9222", browser_cfg)
+
+    def test_runtime_config_defaults_single_task_timeout(self):
+        runtime_cfg = load_runtime_config("/path/that/does/not/exist.json")
+        self.assertEqual(runtime_cfg["execution"]["single_task_timeout_seconds"], 180)
+        self.assertTrue(runtime_cfg["execution"]["isolated_task_worker"])
+        self.assertEqual(runtime_cfg["execution"]["worker_poll_interval_seconds"], 10)
+        self.assertEqual(runtime_cfg["execution"]["worker_timeout_buffer_seconds"], 20)
+
+    def test_task_timeout_guard_raises_after_deadline(self):
+        with self.assertRaises(TimeoutError):
+            with task_timeout_guard(1):
+                time.sleep(2)
 
 
 if __name__ == "__main__":

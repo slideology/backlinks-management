@@ -91,15 +91,27 @@ PY
 
 restart_bot_chrome() {
     echo "-> 正在重启机器人专属 $BOT_CHROME_NAME..."
-    pkill -f "Google Chrome Canary.*--remote-debugging-port=$CDP_PORT.*ChromeAutoBot" >/dev/null 2>&1 || true
-    pkill -f "Google Chrome.*--remote-debugging-port=$CDP_PORT.*ChromeAutoBot" >/dev/null 2>&1 || true
-    pkill -f "ChromeAutoBot" >/dev/null 2>&1 || true
+    pkill -f "Google Chrome Canary.*--remote-debugging-port=$CDP_PORT.*$BOT_CHROME_DATA" >/dev/null 2>&1 || true
+    pkill -f "Google Chrome.*--remote-debugging-port=$CDP_PORT.*$BOT_CHROME_DATA" >/dev/null 2>&1 || true
+    pkill -f "$BOT_CHROME_DATA" >/dev/null 2>&1 || true
     sleep 2
-    open -na "$BOT_CHROME_APP" --args \
-        --remote-debugging-port="$CDP_PORT" \
-        --user-data-dir="$BOT_CHROME_DATA" \
-        --no-first-run \
+    CHROME_ARGS=(
+        --remote-debugging-port="$CDP_PORT"
+        --user-data-dir="$BOT_CHROME_DATA"
+        --no-first-run
         --no-default-browser-check
+        --disable-default-apps
+        --disable-background-networking
+    )
+    if [[ "$BOT_DISABLE_EXTENSIONS" == "1" ]]; then
+        CHROME_ARGS+=(--disable-extensions --disable-component-extensions-with-background-pages)
+    fi
+    if [[ "$BOT_LAUNCH_IN_BACKGROUND" == "1" ]]; then
+        open -g -na "$BOT_CHROME_APP" --args "${CHROME_ARGS[@]}"
+    else
+        open -na "$BOT_CHROME_APP" --args "${CHROME_ARGS[@]}"
+    fi
+    hide_bot_chrome
 }
 
 echo "=================================================="
@@ -113,8 +125,175 @@ echo "=================================================="
 #   - 机器人优先启动独立的 Chrome Canary（使用专属账号目录 ~/ChromeAutoBot）
 #   - 两个 Chrome 实例互不干扰、和平共处！
 
-BOT_CHROME_DATA="$HOME/ChromeAutoBot"
+BOT_CHROME_DATA="$("$PYTHON_BIN" - <<'PY'
+import json
+from pathlib import Path
+
+default = str(Path.home() / "ChromeCanaryAutoBot9666")
+try:
+    payload = json.loads(Path("config.json").read_text(encoding="utf-8"))
+    browser = payload.get("browser") or {}
+    print(str(browser.get("profile_dir") or default))
+except Exception:
+    print(default)
+PY
+)"
+BOT_DISABLE_EXTENSIONS="$("$PYTHON_BIN" - <<'PY'
+import json
+from pathlib import Path
+
+try:
+    payload = json.loads(Path("config.json").read_text(encoding="utf-8"))
+    browser = payload.get("browser") or {}
+    print("1" if bool(browser.get("disable_extensions", True)) else "0")
+except Exception:
+    print("1")
+PY
+)"
+BOT_LAUNCH_IN_BACKGROUND="$("$PYTHON_BIN" - <<'PY'
+import json
+from pathlib import Path
+
+try:
+    payload = json.loads(Path("config.json").read_text(encoding="utf-8"))
+    browser = payload.get("browser") or {}
+    print("1" if bool(browser.get("launch_in_background", True)) else "0")
+except Exception:
+    print("1")
+PY
+)"
+BOT_HIDE_AFTER_LAUNCH="$("$PYTHON_BIN" - <<'PY'
+import json
+from pathlib import Path
+
+try:
+    payload = json.loads(Path("config.json").read_text(encoding="utf-8"))
+    browser = payload.get("browser") or {}
+    print("1" if bool(browser.get("hide_after_launch", True)) else "0")
+except Exception:
+    print("1")
+PY
+)"
 AUTO_MODE="${AUTO_MODE:-0}"
+RUN_LOG_FILE="${RUN_LOG_FILE:-$PROJECT_DIR/logs/launchd.stdout.log}"
+if [[ "$RUN_LOG_FILE" != /* ]]; then
+    RUN_LOG_FILE="$PROJECT_DIR/$RUN_LOG_FILE"
+fi
+mkdir -p "$PROJECT_DIR/logs" "$(dirname "$RUN_LOG_FILE")"
+touch "$RUN_LOG_FILE"
+
+WATCHDOG_TIMEOUT_SECONDS="$("$PYTHON_BIN" - <<'PY'
+import json
+from pathlib import Path
+
+default = 300
+try:
+    payload = json.loads(Path("config.json").read_text(encoding="utf-8"))
+    print(int((payload.get("watchdog") or {}).get("no_progress_timeout_seconds", default) or default))
+except Exception:
+    print(default)
+PY
+)"
+
+WATCHDOG_POLL_SECONDS="$("$PYTHON_BIN" - <<'PY'
+import json
+from pathlib import Path
+
+default = 15
+try:
+    payload = json.loads(Path("config.json").read_text(encoding="utf-8"))
+    print(int((payload.get("watchdog") or {}).get("poll_interval_seconds", default) or default))
+except Exception:
+    print(default)
+PY
+)"
+
+send_watchdog_alert() {
+    local reason="$1"
+    local child_pid="${2:-}"
+    WATCHDOG_ALERT_REASON="$reason" \
+    WATCHDOG_ALERT_CHILD_PID="$child_pid" \
+    WATCHDOG_ALERT_PORT="$CDP_PORT" \
+    WATCHDOG_ALERT_BROWSER="$BOT_CHROME_NAME" \
+    WATCHDOG_ALERT_TIME="$(date '+%Y-%m-%d %H:%M:%S')" \
+    "$PYTHON_BIN" - <<'PY'
+import os
+from webhook_sender import create_webhook_sender
+
+sender = create_webhook_sender()
+if sender:
+    sender.send_exception_alert(
+        "🚨 外链任务异常中断",
+        os.environ.get("WATCHDOG_ALERT_REASON", "任务异常中断"),
+        {
+            "日期": os.environ.get("WATCHDOG_ALERT_TIME", ""),
+            "CDP 端口": os.environ.get("WATCHDOG_ALERT_PORT", ""),
+            "浏览器": os.environ.get("WATCHDOG_ALERT_BROWSER", ""),
+            "子进程PID": os.environ.get("WATCHDOG_ALERT_CHILD_PID", ""),
+        },
+    )
+PY
+}
+
+hide_bot_chrome() {
+    if [[ "$BOT_HIDE_AFTER_LAUNCH" != "1" ]]; then
+        return
+    fi
+
+    /usr/bin/osascript <<OSA >/dev/null 2>&1 || true
+tell application "$BOT_CHROME_NAME"
+    if it is running then
+        try
+            set visible to false
+        end try
+    end if
+end tell
+OSA
+}
+
+monitor_orchestrator() {
+    local child_pid="$1"
+    local last_progress_epoch
+    local last_mtime=0
+    local alert_sent=0
+
+    if [[ -f "$RUN_LOG_FILE" ]]; then
+        last_mtime="$(stat -f %m "$RUN_LOG_FILE" 2>/dev/null || echo 0)"
+    fi
+    last_progress_epoch="$(date +%s)"
+
+    while kill -0 "$child_pid" >/dev/null 2>&1; do
+        local current_epoch current_mtime
+        current_epoch="$(date +%s)"
+        if [[ -f "$RUN_LOG_FILE" ]]; then
+            current_mtime="$(stat -f %m "$RUN_LOG_FILE" 2>/dev/null || echo 0)"
+            if [[ "$current_mtime" -gt "$last_mtime" ]]; then
+                last_mtime="$current_mtime"
+                last_progress_epoch="$current_epoch"
+            fi
+        fi
+
+        if (( current_epoch - last_progress_epoch >= WATCHDOG_TIMEOUT_SECONDS )); then
+            echo "❌ watchdog 触发：超过 ${WATCHDOG_TIMEOUT_SECONDS} 秒没有新的日志进展，正在终止任务..."
+            kill -TERM "$child_pid" >/dev/null 2>&1 || true
+            sleep 5
+            kill -KILL "$child_pid" >/dev/null 2>&1 || true
+            send_watchdog_alert "任务超过 ${WATCHDOG_TIMEOUT_SECONDS} 秒没有新的日志进展，已被 watchdog 自动终止。" "$child_pid"
+            alert_sent=1
+            break
+        fi
+
+        sleep "$WATCHDOG_POLL_SECONDS"
+    done
+
+    wait "$child_pid"
+    local child_rc=$?
+    if [[ "$child_rc" -ne 0 && "$alert_sent" -eq 0 ]]; then
+        echo "❌ daily_run_orchestrator.py 异常退出，退出码: $child_rc"
+        send_watchdog_alert "daily_run_orchestrator.py 异常退出，退出码: $child_rc" "$child_pid"
+    fi
+    return "$child_rc"
+}
 
 # 首次运行时自动创建机器人专属目录
 mkdir -p "$BOT_CHROME_DATA"
@@ -124,6 +303,7 @@ if curl -s "http://localhost:$CDP_PORT/json/version" > /dev/null 2>&1; then
     echo "-> 检测到 $CDP_PORT 端口已打开，正在做 CDP 健康检查..."
     if check_bot_cdp_health >/dev/null 2>&1; then
         echo "-> 机器人 Chrome 已在运行且状态健康，无需重启。"
+        hide_bot_chrome
     else
         echo "-> $CDP_PORT 虽然可访问，但 CDP 会话不健康，准备自动重启机器人 Chrome。"
         restart_bot_chrome
@@ -151,6 +331,7 @@ echo "-> 正在确认机器人 Chrome 的 CDP 会话健康..."
 for _ in {1..8}; do
     if curl -s "http://localhost:$CDP_PORT/json/version" > /dev/null 2>&1 && check_bot_cdp_health >/dev/null 2>&1; then
         echo "-> Chrome 已在后台启动并通过 CDP 健康检查。"
+        hide_bot_chrome
         break
     fi
     sleep 2
@@ -169,7 +350,15 @@ echo ""
 echo "=================================================="
 echo "🎯 环节2: 正在运行 daily_run_orchestrator.py 自动补批次直到成功目标..."
 echo "=================================================="
-"$PYTHON_BIN" -u daily_run_orchestrator.py
+"$PYTHON_BIN" -u daily_run_orchestrator.py &
+ORCH_PID=$!
+monitor_orchestrator "$ORCH_PID"
+ORCH_RC=$?
+
+if [[ "$ORCH_RC" -ne 0 ]]; then
+    echo "❌ 日总控异常结束（退出码: $ORCH_RC）"
+    exit "$ORCH_RC"
+fi
 
 
 echo ""

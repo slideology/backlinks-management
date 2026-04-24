@@ -967,6 +967,203 @@ class BacklinkStateTests(unittest.TestCase):
         self.assertEqual(rows[0]["评论区是否存在"], "是")
         self.assertEqual(rows[0]["历史外链验证结果"], "bearclicker.net")
 
+    def test_build_source_master_rows_preserves_explicit_page_probe_fields(self):
+        targets = [
+            {"站点标识": "bearclicker.net", "目标网站": "https://bearclicker.net/", "优先级": "1", "是否启用": "是"},
+        ]
+        rows = build_source_master_rows(
+            [
+                {
+                    "来源标题": "Example",
+                    "来源链接": "https://example.com/post",
+                    "根域名": "example.com",
+                    "页面评分": "30",
+                    "目标站标识": "bearclicker.net",
+                    "状态": STATUS_NOT_STARTED,
+                }
+            ],
+            targets,
+            existing_source_rows=[
+                {
+                    "来源链接": "https://example.com/post",
+                    "页面探测状态": "completed",
+                    "页面探测时间": "2026-04-21 09:00:00",
+                    "是否值得发帖": "是",
+                    "页面探测失败原因": "",
+                }
+            ],
+        )
+
+        self.assertEqual(rows[0]["页面探测状态"], "completed")
+        self.assertEqual(rows[0]["页面探测时间"], "2026-04-21 09:00:00")
+        self.assertEqual(rows[0]["是否值得发帖"], "是")
+
+    def test_build_source_master_rows_ignores_shifted_invalid_page_probe_fields(self):
+        targets = [
+            {"站点标识": "bearclicker.net", "目标网站": "https://bearclicker.net/", "优先级": "1", "是否启用": "是"},
+        ]
+        rows = build_source_master_rows(
+            [
+                {
+                    "来源标题": "Example",
+                    "来源链接": "https://example.com/post",
+                    "根域名": "example.com",
+                    "页面评分": "30",
+                    "目标站标识": "bearclicker.net",
+                    "状态": STATUS_PENDING_RETRY,
+                }
+            ],
+            targets,
+            existing_source_rows=[
+                {
+                    "来源链接": "https://example.com/post",
+                    "页面探测状态": "bearclicker.net",
+                    "页面探测时间": "待重试",
+                    "是否值得发帖": "",
+                    "页面探测失败原因": "",
+                }
+            ],
+        )
+
+        self.assertEqual(rows[0]["页面探测状态"], "pending")
+        self.assertEqual(rows[0]["页面探测时间"], "")
+        self.assertEqual(rows[0]["是否值得发帖"], "")
+
+    @patch("backlink_state._load_agent_assist_runtime", return_value={"same_domain_daily_limit": 0})
+    def test_select_daily_tasks_prefers_probe_completed_yes_before_unprobed(self, _mock_cfg):
+        targets = [
+            {
+                "站点标识": "bearclicker.net",
+                "目标网站": "https://bearclicker.net/",
+                "优先级": "1",
+                "冷却天数": "1",
+                "每日成功目标": "1",
+                "是否启用": "是",
+                "创建时间": "2026-04-21 08:00:00",
+            }
+        ]
+        status_rows = [
+            {
+                "来源链接": "https://unprobed.com/post",
+                "来源标题": "Unprobed",
+                "根域名": "unprobed.com",
+                "页面评分": "99",
+                "目标站标识": "bearclicker.net",
+                "状态": STATUS_NOT_STARTED,
+                "页面探测状态": "pending",
+                "是否值得发帖": "",
+            },
+            {
+                "来源链接": "https://probed.com/post",
+                "来源标题": "Probed",
+                "根域名": "probed.com",
+                "页面评分": "10",
+                "目标站标识": "bearclicker.net",
+                "状态": STATUS_NOT_STARTED,
+                "页面探测状态": "completed",
+                "是否值得发帖": "是",
+            },
+        ]
+
+        selected, _, _ = select_daily_tasks(status_rows, targets, now=datetime(2026, 4, 21, 12, 0, 0))
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["status_row"]["来源链接"], "https://probed.com/post")
+
+    @patch("backlink_state._load_agent_assist_runtime", return_value={"same_domain_daily_limit": 0})
+    def test_select_daily_tasks_falls_back_to_unprobed_when_probe_pass_insufficient(self, _mock_cfg):
+        targets = [
+            {
+                "站点标识": "bearclicker.net",
+                "目标网站": "https://bearclicker.net/",
+                "优先级": "1",
+                "冷却天数": "1",
+                "每日成功目标": "2",
+                "是否启用": "是",
+                "创建时间": "2026-04-21 08:00:00",
+            }
+        ]
+        status_rows = [
+            {
+                "来源链接": "https://probed.com/post",
+                "来源标题": "Probed",
+                "根域名": "probed.com",
+                "页面评分": "10",
+                "目标站标识": "bearclicker.net",
+                "状态": STATUS_NOT_STARTED,
+                "页面探测状态": "completed",
+                "是否值得发帖": "是",
+            },
+            {
+                "来源链接": "https://unprobed.com/post",
+                "来源标题": "Unprobed",
+                "根域名": "unprobed.com",
+                "页面评分": "30",
+                "目标站标识": "bearclicker.net",
+                "状态": STATUS_NOT_STARTED,
+                "页面探测状态": "pending",
+                "是否值得发帖": "",
+            },
+        ]
+
+        selected, _, _ = select_daily_tasks(status_rows, targets, now=datetime(2026, 4, 21, 12, 0, 0))
+
+        self.assertEqual(
+            [task["status_row"]["来源链接"] for task in selected],
+            ["https://probed.com/post", "https://unprobed.com/post"],
+        )
+
+    @patch("backlink_state._load_agent_assist_runtime", return_value={"same_domain_daily_limit": 0})
+    def test_select_daily_tasks_skips_probe_no_and_review_rows(self, _mock_cfg):
+        targets = [
+            {
+                "站点标识": "bearclicker.net",
+                "目标网站": "https://bearclicker.net/",
+                "优先级": "1",
+                "冷却天数": "1",
+                "每日成功目标": "3",
+                "是否启用": "是",
+                "创建时间": "2026-04-21 08:00:00",
+            }
+        ]
+        status_rows = [
+            {
+                "来源链接": "https://no.com/post",
+                "来源标题": "No",
+                "根域名": "no.com",
+                "页面评分": "99",
+                "目标站标识": "bearclicker.net",
+                "状态": STATUS_NOT_STARTED,
+                "页面探测状态": "completed",
+                "是否值得发帖": "否",
+            },
+            {
+                "来源链接": "https://review.com/post",
+                "来源标题": "Review",
+                "根域名": "review.com",
+                "页面评分": "90",
+                "目标站标识": "bearclicker.net",
+                "状态": STATUS_NOT_STARTED,
+                "页面探测状态": "completed",
+                "是否值得发帖": "待确认",
+            },
+            {
+                "来源链接": "https://yes.com/post",
+                "来源标题": "Yes",
+                "根域名": "yes.com",
+                "页面评分": "20",
+                "目标站标识": "bearclicker.net",
+                "状态": STATUS_NOT_STARTED,
+                "页面探测状态": "completed",
+                "是否值得发帖": "是",
+            },
+        ]
+
+        selected, _, _ = select_daily_tasks(status_rows, targets, now=datetime(2026, 4, 21, 12, 0, 0))
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["status_row"]["来源链接"], "https://yes.com/post")
+
     @patch("backlink_state.AgentMemory")
     def test_reconcile_populates_agent_execution_fields_from_memory(self, mock_memory_cls):
         fake_memory = mock_memory_cls.return_value
@@ -1027,6 +1224,54 @@ class BacklinkStateTests(unittest.TestCase):
         self.assertEqual(status_rows[0]["推荐策略"], "vision")
         self.assertEqual(status_rows[0]["最近失败分类"], "vision_unavailable")
         self.assertEqual(status_rows[0]["域名冷却至"], "2026-03-24 18:00:00")
+
+    def test_reconcile_propagates_source_probe_fields_into_runtime_rows(self):
+        targets = [
+            {
+                "站点标识": "bearclicker.net",
+                "目标网站": "https://bearclicker.net/",
+                "优先级": "1",
+                "冷却天数": "1",
+                "每日成功目标": "10",
+                "是否启用": "是",
+                "创建时间": "2026-04-21 08:00:00",
+            }
+        ]
+        status_rows = reconcile_status_rows(
+            existing_status_rows=[
+                {
+                    "来源链接": "https://example.com/post",
+                    "来源标题": "Example",
+                    "根域名": "example.com",
+                    "页面评分": "30",
+                    "目标站标识": "bearclicker.net",
+                    "状态": STATUS_NOT_STARTED,
+                }
+            ],
+            target_rows=targets,
+            library_rows=[
+                {
+                    "来源标题": "Example",
+                    "来源链接": "https://example.com/post",
+                    "根域名": "example.com",
+                    "页面评分": "30",
+                }
+            ],
+            legacy_history_rows=[],
+            existing_source_rows=[
+                {
+                    "来源链接": "https://example.com/post",
+                    "页面探测状态": "completed",
+                    "页面探测时间": "2026-04-21 09:00:00",
+                    "是否值得发帖": "是",
+                    "页面探测失败原因": "",
+                }
+            ],
+            now=datetime(2026, 4, 21, 12, 0, 0),
+        )
+
+        self.assertEqual(status_rows[0]["页面探测状态"], "completed")
+        self.assertEqual(status_rows[0]["是否值得发帖"], "是")
 
     def test_build_target_rows_and_reconcile_migrate_short_aliases_to_domain_ids(self):
         targets = build_target_site_rows(

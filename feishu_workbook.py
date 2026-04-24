@@ -18,6 +18,7 @@ def load_reporting_config(config_path: str = "config.json") -> dict:
         "write_buffer_file": "artifacts/reporting_workbook/write_buffer.json",
         "flush_buffer_limit": 20,
         "excluded_source_domains": [],
+        "excluded_source_urls": [],
         "sheet_titles": {
             "sources": "来源主表",
             "records": "站点发布状态表",
@@ -471,6 +472,21 @@ class FeishuWorkbook:
                 }
             )
             return 0
+
+    def upsert_status_row(self, row: dict, max_rows: int = 50000) -> int:
+        """
+        Backward-compatible wrapper for older call sites that still expect a
+        dedicated status-row helper.
+        """
+        from backlink_state import STATUS_HEADERS
+
+        return self.upsert_sheet_dict(
+            "records",
+            STATUS_HEADERS,
+            ["来源链接", "目标站标识"],
+            row,
+            max_rows=max_rows,
+        )
 
     def _sync_sheet_dicts_now(
         self,

@@ -2,8 +2,23 @@
   "webhook": {
     "url": "https://open.feishu.cn/open-apis/bot/v2/hook/0bde20e9-1cc2-4046-b99e-91cd5d219351"
   },
+  "watchdog": {
+    "no_progress_timeout_seconds": 300,
+    "poll_interval_seconds": 15
+  },
   "scheduler": {
     "daily_limit": 20,
+    "timezone": "Asia/Shanghai",
+    "run_windows": [
+      {
+        "start": "08:00",
+        "end": "10:00"
+      },
+      {
+        "start": "12:00",
+        "end": "14:00"
+      }
+    ],
     "priority_order": [
       "high",
       "medium",
@@ -18,6 +33,10 @@
   "execution": {
     "success_goal": 10,
     "page_load_timeout_ms": 15000,
+    "single_task_timeout_seconds": 180,
+    "isolated_task_worker": true,
+    "worker_poll_interval_seconds": 10,
+    "worker_timeout_buffer_seconds": 20,
     "max_retries": 1,
     "enable_sso": false
   },
@@ -36,14 +55,18 @@
     "request_timeout_seconds": 20,
     "retry_attempts": 3,
     "retry_backoff_seconds": 2,
-    "model": "gemini-3-flash-preview",
+    "model": "gemini-3.1-flash-lite-preview",
     "fallback_model": "gemini-flash-lite-latest"
   },
   "browser": {
     "connect_cdp_url": "http://127.0.0.1:9666",
     "allow_only_cdp_url": "http://127.0.0.1:9666",
     "bring_to_front": false,
-    "require_cdp": true
+    "launch_in_background": true,
+    "hide_after_launch": true,
+    "require_cdp": true,
+    "profile_dir": "/Users/dahuang/ChromeCanaryAutoBot9666",
+    "disable_extensions": true
   },
   "vision": {
     "enabled": true,
@@ -65,6 +88,19 @@
     "confidence_threshold": 0.8,
     "enable_vision": true,
     "page_load_timeout_ms": 20000,
+    "read_page_size": 250,
+    "write_retry_count": 5,
+    "write_retry_base_seconds": 2
+  },
+  "page_probe": {
+    "state_file": "artifacts/page_probe/state.json",
+    "summary_file": "artifacts/page_probe/summary.json",
+    "report_json_file": "artifacts/page_probe/source_probe_results.json",
+    "report_csv_file": "artifacts/page_probe/source_probe_results.csv",
+    "confidence_threshold": 0.8,
+    "enable_vision": true,
+    "page_load_timeout_ms": 15000,
+    "single_page_timeout_seconds": 120,
     "read_page_size": 250,
     "write_retry_count": 5,
     "write_retry_base_seconds": 2
@@ -95,6 +131,63 @@
     "state_file": "artifacts/reporting_workbook/state.json",
     "excluded_source_domains": [
       "search.yahoo.com"
+    ],
+    "excluded_source_urls": [
+      "https://connections.gg/",
+      "https://numberle.org/",
+      "https://octordly.com/",
+      "https://quordly.com/",
+      "https://spellbee.org/",
+      "https://326.amdm.ru/qa/post/5123/",
+      "https://321.amdm.ru/qa/post/5123/",
+      "https://258.amdm.ru/qa/post/5123/",
+      "https://133.amdm.ru/qa/post/5123/",
+      "https://123.amdm.ru/qa/post/5123/",
+      "https://6.amdm.ru/qa/post/5123/",
+      "https://4.amdm.ru/qa/post/5123/",
+      "https://2.amdm.ru/qa/post/5123/",
+      "https://29.amdm.ru/qa/post/5123/",
+      "https://865.amdm.ru/qa/post/5123/",
+      "https://768.amdm.ru/qa/post/5123/",
+      "https://149.amdm.ru/qa/post/5123/",
+      "https://43.amdm.ru/qa/post/5123/",
+      "https://752.amdm.ru/qa/post/5123/",
+      "https://660.amdm.ru/qa/post/5123/",
+      "https://634.amdm.ru/qa/post/5123/",
+      "https://459.amdm.ru/qa/post/5123/",
+      "https://76.amdm.ru/qa/post/5123/",
+      "https://891.amdm.ru/qa/post/5123/",
+      "https://862.amdm.ru/qa/post/5123/",
+      "https://778.amdm.ru/qa/post/5123/",
+      "https://3.amdm.ru/qa/post/5585/",
+      "https://375.amdm.ru/qa/post/5585/",
+      "https://369.amdm.ru/qa/post/5585/",
+      "https://187.amdm.ru/qa/post/5585/",
+      "https://186.amdm.ru/qa/post/5585/",
+      "https://167.amdm.ru/qa/post/5585/",
+      "https://82.amdm.ru/qa/post/5585/",
+      "https://55.amdm.ru/qa/post/5585/",
+      "https://40.amdm.ru/qa/post/5585/",
+      "https://00.amdm.ru/qa/post/5585/",
+      "https://936.amdm.ru/qa/post/5585/",
+      "https://496.amdm.ru/qa/post/5585/",
+      "https://128.amdm.ru/qa/post/5585/",
+      "https://619.amdm.ru/qa/post/5585/",
+      "https://511.amdm.ru/qa/post/5585/",
+      "https://913.amdm.ru/qa/post/5585/",
+      "https://772.amdm.ru/qa/post/5585/",
+      "https://www1.amdm.ru/qa/post/5585/",
+      "https://114.amdm.ru/qa/post/6432/",
+      "https://48.amdm.ru/qa/post/6432/",
+      "https://739.amdm.ru/qa/post/6432/",
+      "https://708.amdm.ru/qa/post/6432/",
+      "https://999.amdm.ru/qa/post/6432/",
+      "https://789.amdm.ru/qa/post/6432/",
+      "https://17.amdm.ru/qa/post/6618/",
+      "https://991.amdm.ru/qa/post/6618/",
+      "https://235.amdm.ru/qa/post/7087/",
+      "https://577.amdm.ru/qa/post/7087/",
+      "https://454.amdm.ru/qa/post/7087/"
     ],
     "sheet_titles": {
       "sources": "来源总表",

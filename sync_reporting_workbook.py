@@ -19,7 +19,13 @@ from backlink_state import (
     reconcile_status_rows,
 )
 from feishu_workbook import FeishuWorkbook
-from legacy_feishu_history import LegacyFeishuHistoryStore, load_legacy_history_config
+from legacy_feishu_history import (
+    LegacyFeishuHistoryStore,
+    extract_cell_text,
+    extract_cell_url,
+    load_legacy_history_config,
+    normalize_source_url,
+)
 
 
 def _normalize_excluded_domains(domains: list[str] | tuple[str, ...] | None) -> set[str]:
@@ -31,11 +37,32 @@ def _normalize_excluded_domains(domains: list[str] | tuple[str, ...] | None) -> 
     return normalized
 
 
-def _row_matches_excluded_domains(row: dict, excluded_domains: set[str]) -> bool:
-    if not excluded_domains:
+def _normalize_excluded_urls(urls: list[str] | tuple[str, ...] | None) -> set[str]:
+    normalized = set()
+    for url in urls or []:
+        text = normalize_source_url(str(url or "").strip())
+        if text:
+            normalized.add(text)
+    return normalized
+
+
+def _row_source_url(row: dict) -> str:
+    raw_value = row.get("来源链接", "")
+    normalized = normalize_source_url(extract_cell_url(raw_value) or extract_cell_text(raw_value))
+    if normalized:
+        return normalized
+    return str(extract_cell_text(raw_value) or raw_value or "").strip()
+
+
+def _row_matches_exclusions(row: dict, excluded_domains: set[str], excluded_urls: set[str]) -> bool:
+    if not excluded_domains and not excluded_urls:
         return False
-    source_url = str(row.get("来源链接", "") or "").strip()
+    source_url = _row_source_url(row)
     if not source_url:
+        return False
+    if excluded_urls and source_url in excluded_urls:
+        return True
+    if not excluded_domains:
         return False
     try:
         hostname = (urlparse(source_url).hostname or "").strip().lower()
@@ -46,10 +73,10 @@ def _row_matches_excluded_domains(row: dict, excluded_domains: set[str]) -> bool
     return any(hostname == domain or hostname.endswith(f".{domain}") for domain in excluded_domains)
 
 
-def _filter_rows_by_excluded_domains(rows: list[dict], excluded_domains: set[str]) -> list[dict]:
-    if not excluded_domains:
+def _filter_rows_by_exclusions(rows: list[dict], excluded_domains: set[str], excluded_urls: set[str]) -> list[dict]:
+    if not excluded_domains and not excluded_urls:
         return rows
-    return [row for row in rows if not _row_matches_excluded_domains(row, excluded_domains)]
+    return [row for row in rows if not _row_matches_exclusions(row, excluded_domains, excluded_urls)]
 
 
 def _read_existing_targets(workbook: FeishuWorkbook) -> list[dict]:
@@ -89,6 +116,7 @@ def build_reporting_snapshot(workbook: Optional[FeishuWorkbook] = None) -> dict:
         raise RuntimeError("飞书未正确配置，无法同步运营总表。")
 
     excluded_domains = _normalize_excluded_domains(workbook.config.get("excluded_source_domains", []))
+    excluded_urls = _normalize_excluded_urls(workbook.config.get("excluded_source_urls", []))
     history_store = LegacyFeishuHistoryStore.from_config()
     legacy_config = load_legacy_history_config()
 
@@ -112,14 +140,15 @@ def build_reporting_snapshot(workbook: Optional[FeishuWorkbook] = None) -> dict:
         target_rows=target_rows,
         library_rows=library_rows,
         legacy_history_rows=history_rows,
+        existing_source_rows=existing_source_rows,
         promoted_site_map=legacy_config.get("promoted_site_map"),
     )
     source_rows = build_source_master_rows(status_rows, target_rows, existing_source_rows=existing_source_rows)
 
-    history_rows = _filter_rows_by_excluded_domains(history_rows, excluded_domains)
-    library_rows = _filter_rows_by_excluded_domains(library_rows, excluded_domains)
-    status_rows = _filter_rows_by_excluded_domains(status_rows, excluded_domains)
-    source_rows = _filter_rows_by_excluded_domains(source_rows, excluded_domains)
+    history_rows = _filter_rows_by_exclusions(history_rows, excluded_domains, excluded_urls)
+    library_rows = _filter_rows_by_exclusions(library_rows, excluded_domains, excluded_urls)
+    status_rows = _filter_rows_by_exclusions(status_rows, excluded_domains, excluded_urls)
+    source_rows = _filter_rows_by_exclusions(source_rows, excluded_domains, excluded_urls)
 
     return {
         "spreadsheet_token": workbook.spreadsheet_token,

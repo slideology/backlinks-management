@@ -10,6 +10,42 @@ class WebhookSender:
         """初始化 Webhook 发送器"""
         self.webhook_url = webhook_url
 
+    def send_exception_alert(self, title: str, message: str, details: dict | None = None) -> bool:
+        """发送异常/中断提醒，供 watchdog 或外层守护使用。"""
+        try:
+            details = details or {}
+            md_lines = [f"**异常说明**: {message}"]
+            if details:
+                md_lines.append("")
+                md_lines.append("**上下文：**")
+                for key, value in details.items():
+                    clean_key = str(key or "").strip()
+                    clean_value = str(value or "").strip()
+                    if clean_key and clean_value:
+                        md_lines.append(f"- **{clean_key}**: {clean_value}")
+
+            card = {
+                "config": {"wide_screen_mode": True},
+                "header": {
+                    "title": {"tag": "plain_text", "content": title},
+                    "template": "red",
+                },
+                "elements": [
+                    {
+                        "tag": "markdown",
+                        "content": "\n".join(md_lines),
+                    }
+                ],
+            }
+            payload = {
+                "msg_type": "interactive",
+                "card": card,
+            }
+            return self._send_payload(payload)
+        except Exception as e:
+            logger.error(f"发送异常提醒失败: {str(e)}")
+            return False
+
     def send_summary_report(self, title: str, summary: dict) -> bool:
         """发送精简汇总消息卡片，只保留站点级别结果。"""
         try:

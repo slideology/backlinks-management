@@ -1,6 +1,7 @@
 import json
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, time
+from zoneinfo import ZoneInfo
 
 import daily_scheduler
 from backlink_state import STATUS_SUCCESS, iso_date
@@ -14,6 +15,11 @@ def load_config(config_path: str = "config.json"):
         "scheduler": {
             "max_rounds_per_day": 20,
             "max_idle_rounds_per_day": 2,
+            "timezone": "Asia/Shanghai",
+            "run_windows": [
+                {"start": "08:00", "end": "10:00"},
+                {"start": "12:00", "end": "14:00"},
+            ],
         },
     }
     try:
@@ -34,6 +40,27 @@ def _count_today_success_by_site(status_rows: list[dict], today_str: str) -> dic
             site_key = row.get("目标站标识", "")
             counts[site_key] = counts.get(site_key, 0) + 1
     return counts
+
+
+def _parse_window_clock(value: str) -> time:
+    hour_text, minute_text = str(value or "").split(":", 1)
+    return time(hour=int(hour_text), minute=int(minute_text))
+
+
+def _resolve_run_window(now: datetime, windows: list[dict]) -> dict | None:
+    for window in windows or []:
+        try:
+            start_clock = _parse_window_clock(window.get("start", ""))
+            end_clock = _parse_window_clock(window.get("end", ""))
+        except Exception:
+            continue
+        if start_clock <= now.time() < end_clock:
+            return {
+                "start": start_clock,
+                "end": end_clock,
+                "label": f"{start_clock.strftime('%H:%M')}-{end_clock.strftime('%H:%M')}",
+            }
+    return None
 
 
 def main():
@@ -62,12 +89,23 @@ def main():
     # =====================================================================
     # 📋 传统模式（原有定序流水线，Agent 降级时也走这里）
     # =====================================================================
-    configured_max_rounds = int(config["scheduler"].get("max_rounds_per_day", 20) or 0)
+    scheduler_cfg = config["scheduler"]
+    timezone_name = str(scheduler_cfg.get("timezone", "Asia/Shanghai") or "Asia/Shanghai")
+    now_local = datetime.now(ZoneInfo(timezone_name))
+    active_window = _resolve_run_window(now_local, scheduler_cfg.get("run_windows", []))
+    if not active_window:
+        print("=" * 60)
+        print(f"🕒 当前时间 {now_local.strftime('%Y-%m-%d %H:%M:%S')} 不在允许运行窗口内，跳过本轮。")
+        print("=" * 60)
+        return
+
+    configured_max_rounds = int(scheduler_cfg.get("max_rounds_per_day", 20) or 0)
     max_rounds = configured_max_rounds if configured_max_rounds > 0 else 1000000
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = now_local.strftime("%Y-%m-%d")
 
     print("=" * 60)
     print(f"🚦 飞书多站点日总控启动 - {today_str}")
+    print(f"🕒 当前运行窗口: {active_window['label']} ({timezone_name})")
     print(f"🔁 最多轮次: {'无限制' if configured_max_rounds <= 0 else max_rounds}")
     print("=" * 60)
 
@@ -79,6 +117,12 @@ def main():
     finished_all_rounds = True
 
     for round_idx in range(1, max_rounds + 1):
+        round_now = datetime.now(ZoneInfo(timezone_name))
+        if round_now.time() >= active_window["end"]:
+            stop_reason = f"达到运行窗口结束时间（{active_window['label']}）"
+            finished_all_rounds = False
+            break
+
         print(f"\n{'=' * 60}")
         print(f"🔄 第 {round_idx}/{max_rounds} 轮开始")
         print(f"{'=' * 60}")
@@ -107,7 +151,7 @@ def main():
             else:
                 idle_rounds = 0
 
-            configured_idle_rounds = int(config["scheduler"].get("max_idle_rounds_per_day", 2) or 0)
+            configured_idle_rounds = int(scheduler_cfg.get("max_idle_rounds_per_day", 2) or 0)
             if configured_idle_rounds > 0 and idle_rounds >= configured_idle_rounds:
                 stop_reason = f"连续 {idle_rounds} 轮无新增成功，提前停止"
                 finished_all_rounds = False
@@ -173,4 +217,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

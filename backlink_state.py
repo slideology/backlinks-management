@@ -81,6 +81,10 @@ SOURCE_MASTER_BASE_HEADERS = [
     "来源链接",
     "根域名",
     "页面评分",
+    "页面探测状态",
+    "页面探测时间",
+    "是否值得发帖",
+    "页面探测失败原因",
     "当前应发站点",
     "整体状态",
     "最近成功站点",
@@ -104,6 +108,26 @@ SOURCE_MASTER_BASE_HEADERS = [
     "历史审计状态",
     "格式检测状态",
 ]
+
+PROBE_STATUS_PENDING = "pending"
+PROBE_STATUS_COMPLETED = "completed"
+PROBE_STATUS_FAILED = "failed"
+PROBE_STATUS_SKIPPED = "skipped"
+PROBE_WORTH_YES = "是"
+PROBE_WORTH_NO = "否"
+PROBE_WORTH_REVIEW = "待确认"
+VALID_PROBE_STATUSES = {
+    PROBE_STATUS_PENDING,
+    PROBE_STATUS_COMPLETED,
+    PROBE_STATUS_FAILED,
+    PROBE_STATUS_SKIPPED,
+}
+VALID_PROBE_WORTH_VALUES = {
+    "",
+    PROBE_WORTH_YES,
+    PROBE_WORTH_NO,
+    PROBE_WORTH_REVIEW,
+}
 
 LEGACY_HISTORY_HEADERS = [
     "来源标题",
@@ -332,6 +356,67 @@ def dynamic_source_headers(target_rows: list[dict]) -> list[str]:
             ]
         )
     return SOURCE_MASTER_BASE_HEADERS + dynamic
+
+
+def _extract_source_probe_fields(existing_probe: Optional[dict]) -> dict:
+    row = existing_probe or {}
+    probe_status = str(extract_cell_text(row.get("页面探测状态", "")) or "").strip()
+    probe_time = str(extract_cell_text(row.get("页面探测时间", "")) or "").strip()
+    worth_posting = str(extract_cell_text(row.get("是否值得发帖", "")) or "").strip()
+    probe_reason = str(extract_cell_text(row.get("页面探测失败原因", "")) or "").strip()
+
+    explicit_probe_fields_look_valid = (
+        (not probe_status or probe_status in VALID_PROBE_STATUSES)
+        and worth_posting in VALID_PROBE_WORTH_VALUES
+    )
+
+    if explicit_probe_fields_look_valid and (probe_status or probe_time or worth_posting or probe_reason):
+        return {
+            "页面探测状态": probe_status or PROBE_STATUS_PENDING,
+            "页面探测时间": probe_time,
+            "是否值得发帖": worth_posting or "",
+            "页面探测失败原因": probe_reason,
+        }
+
+    requires_login = str(extract_cell_text(row.get("是否需要登录", "")) or "").strip()
+    has_comment_area = str(extract_cell_text(row.get("评论区是否存在", "")) or "").strip()
+    history_status = str(extract_cell_text(row.get("历史审计状态", "")) or "").strip()
+    format_status = str(extract_cell_text(row.get("格式检测状态", "")) or "").strip()
+
+    if requires_login == "是":
+        return {
+            "页面探测状态": PROBE_STATUS_COMPLETED,
+            "页面探测时间": "",
+            "是否值得发帖": PROBE_WORTH_NO,
+            "页面探测失败原因": "来源主表历史审计判定需要登录后才能评论",
+        }
+    if has_comment_area == "否":
+        return {
+            "页面探测状态": PROBE_STATUS_COMPLETED,
+            "页面探测时间": "",
+            "是否值得发帖": PROBE_WORTH_NO,
+            "页面探测失败原因": "来源主表历史审计未发现可用评论区",
+        }
+    if history_status == "completed" or format_status == "completed":
+        return {
+            "页面探测状态": PROBE_STATUS_COMPLETED,
+            "页面探测时间": "",
+            "是否值得发帖": PROBE_WORTH_YES,
+            "页面探测失败原因": "",
+        }
+    if history_status == "failed" and format_status == "failed":
+        return {
+            "页面探测状态": PROBE_STATUS_FAILED,
+            "页面探测时间": "",
+            "是否值得发帖": PROBE_WORTH_REVIEW,
+            "页面探测失败原因": "历史审计与格式检测均失败，建议复核",
+        }
+    return {
+        "页面探测状态": PROBE_STATUS_PENDING,
+        "页面探测时间": "",
+        "是否值得发帖": "",
+        "页面探测失败原因": "",
+    }
 
 
 def load_targets(config_path: str = "targets.json") -> list[dict]:
@@ -600,6 +685,7 @@ def reconcile_status_rows(
     target_rows: list[dict],
     library_rows: list[dict],
     legacy_history_rows: list[dict],
+    existing_source_rows: Optional[list[dict]] = None,
     promoted_site_map: Optional[dict] = None,
     now: Optional[datetime] = None,
 ) -> list[dict]:
@@ -631,6 +717,11 @@ def reconcile_status_rows(
             history_map[(source_url, site_key)] = {**row, "目标站标识": site_key}
 
     source_catalog = {}
+    existing_source_by_url = {}
+    for row in existing_source_rows or []:
+        source_url = normalize_source_url(extract_cell_url(row.get("来源链接", "")) or extract_cell_text(row.get("来源链接", "")))
+        if source_url:
+            existing_source_by_url[source_url] = row
     for row in library_rows:
         source_url = normalize_source_url(extract_cell_url(row.get("来源链接", "")) or extract_cell_text(row.get("来源链接", "")))
         if not source_url:
@@ -720,6 +811,7 @@ def reconcile_status_rows(
                 "域名冷却至": current.get("域名冷却至", ""),
                 "最后更新时间": current.get("最后更新时间", ""),
             }
+            row.update(_extract_source_probe_fields(existing_source_by_url.get(source_url)))
 
             status = normalize_status_label(row["状态"])
             if status == STATUS_IN_PROGRESS:
@@ -817,11 +909,16 @@ def build_source_master_rows(
 
         anchor_row = rows[0]
         existing_probe = existing_by_url.get(source_url, {})
+        probe_fields = _extract_source_probe_fields(existing_probe)
         summary = {
             "来源标题": anchor_row.get("来源标题", ""),
             "来源链接": source_url,
             "根域名": anchor_row.get("根域名", ""),
             "页面评分": anchor_row.get("页面评分", ""),
+            "页面探测状态": probe_fields["页面探测状态"],
+            "页面探测时间": probe_fields["页面探测时间"],
+            "是否值得发帖": probe_fields["是否值得发帖"],
+            "页面探测失败原因": probe_fields["页面探测失败原因"],
             "当前应发站点": current_row.get("目标站标识", "") if current_row else "",
             "整体状态": STATUS_ALL_DONE if all_done else (current_row.get("状态", STATUS_NOT_STARTED) if current_row else STATUS_NOT_STARTED),
             "最近成功站点": latest_success_row.get("目标站标识", "") if latest_success_row else "",
@@ -890,8 +987,18 @@ def select_daily_tasks(status_rows: list[dict], target_rows: list[dict], now: Op
         fresh_not_started = []
         prioritized_retry = []
         fresh_retry = []
+        unprobed_prioritized_not_started = []
+        unprobed_fresh_not_started = []
+        unprobed_prioritized_retry = []
+        unprobed_fresh_retry = []
         for row in status_rows:
             if row["目标站标识"] != site_key or row["状态"] not in {STATUS_NOT_STARTED, STATUS_PENDING_RETRY}:
+                continue
+            probe_status = str(row.get("页面探测状态", "") or PROBE_STATUS_PENDING).strip() or PROBE_STATUS_PENDING
+            worth_posting = str(row.get("是否值得发帖", "") or "").strip()
+            if worth_posting == PROBE_WORTH_NO:
+                continue
+            if worth_posting == PROBE_WORTH_REVIEW:
                 continue
             cooldown_until = parse_dt(row.get("域名冷却至", ""))
             if cooldown_until and cooldown_until > current_time:
@@ -907,10 +1014,20 @@ def select_daily_tasks(status_rows: list[dict], target_rows: list[dict], now: Op
                 for sibling in siblings
             )
             any_success = any(sibling["状态"] == STATUS_SUCCESS for sibling in siblings)
+            is_probe_pass = probe_status == PROBE_STATUS_COMPLETED and worth_posting == PROBE_WORTH_YES
+            is_unprobed = probe_status in {"", PROBE_STATUS_PENDING}
+            if not is_probe_pass and not is_unprobed:
+                continue
             if row["状态"] == STATUS_NOT_STARTED:
-                bucket = prioritized_not_started if other_success else fresh_not_started if not any_success else None
+                if is_probe_pass:
+                    bucket = prioritized_not_started if other_success else fresh_not_started if not any_success else None
+                else:
+                    bucket = unprobed_prioritized_not_started if other_success else unprobed_fresh_not_started if not any_success else None
             else:
-                bucket = prioritized_retry if other_success else fresh_retry if not any_success else None
+                if is_probe_pass:
+                    bucket = prioritized_retry if other_success else fresh_retry if not any_success else None
+                else:
+                    bucket = unprobed_prioritized_retry if other_success else unprobed_fresh_retry if not any_success else None
             if bucket is None:
                 continue
             bucket.append(row)
@@ -919,11 +1036,19 @@ def select_daily_tasks(status_rows: list[dict], target_rows: list[dict], now: Op
         fresh_not_started.sort(key=_candidate_sort_key)
         prioritized_retry.sort(key=_candidate_sort_key)
         fresh_retry.sort(key=_candidate_sort_key)
+        unprobed_prioritized_not_started.sort(key=_candidate_sort_key)
+        unprobed_fresh_not_started.sort(key=_candidate_sort_key)
+        unprobed_prioritized_retry.sort(key=_candidate_sort_key)
+        unprobed_fresh_retry.sort(key=_candidate_sort_key)
         candidate_rows = (
             prioritized_not_started
             + fresh_not_started
             + prioritized_retry
             + fresh_retry
+            + unprobed_prioritized_not_started
+            + unprobed_fresh_not_started
+            + unprobed_prioritized_retry
+            + unprobed_fresh_retry
         )
         for row in candidate_rows:
             pair_key = (row["来源链接"], row["目标站标识"])

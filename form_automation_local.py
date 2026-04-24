@@ -3,9 +3,17 @@ from __future__ import annotations
 import time
 import json
 import re
+import signal
+import os
+import sys
+import tempfile
+import subprocess
+import argparse
 from datetime import datetime, timedelta
+from contextlib import contextmanager
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
+from pathlib import Path
 
 from playwright.sync_api import sync_playwright, Page, Frame
 
@@ -87,6 +95,22 @@ COMMENT_REVEAL_SELECTORS = (
     'a:has-text("Add Comment")',
     'button:has-text("Comment")',
     'a:has-text("Comment")',
+)
+REVEAL_LINK_BLOCK_MARKERS = (
+    "akismet.com/privacy",
+    "blogger.com/comment/fullpage/",
+    "draft.blogger.com/comment/fullpage/",
+    "privacy-policy",
+    "/privacy/",
+    "/privacy-policy",
+    "/terms",
+    "/policy",
+)
+REVEAL_TEXT_BLOCK_MARKERS = (
+    "comment data is processed",
+    "privacy policy",
+    "terms of service",
+    "cookies",
 )
 CHALLENGE_FRAME_MARKERS = (
     "challenge-platform",
@@ -181,6 +205,10 @@ def load_runtime_config(config_path="config.json"):
         "execution": {
             "success_goal": 10,
             "page_load_timeout_ms": 30000,
+            "single_task_timeout_seconds": 180,
+            "isolated_task_worker": True,
+            "worker_poll_interval_seconds": 10,
+            "worker_timeout_buffer_seconds": 20,
             "max_retries": 1,
             "enable_sso": False,
         },
@@ -205,6 +233,30 @@ def load_runtime_config(config_path="config.json"):
     merged["browser"] = merge_browser_config(config.get("browser", {}) or defaults["browser"])
     merged["vision"] = {**defaults["vision"], **config.get("vision", {})}
     return merged
+
+
+@contextmanager
+def task_timeout_guard(timeout_seconds: int):
+    timeout_seconds = int(timeout_seconds or 0)
+    if timeout_seconds <= 0 or not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    def _handle_timeout(signum, frame):  # pragma: no cover - exercised via integration/runtime
+        raise TimeoutError(f"单条任务执行超时（>{timeout_seconds}秒）")
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    try:
+        signal.signal(signal.SIGALRM, _handle_timeout)
+        signal.alarm(timeout_seconds)
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
+def _current_python_bin() -> str:
+    return sys.executable
 
 
 def summarize_result_message(message: str, limit: int = 160) -> str:
@@ -233,6 +285,13 @@ def _append_agent_trace(meta: dict, step: str) -> None:
         return
     meta.setdefault("action_trace", [])
     meta["action_trace"].append(step)
+
+
+def _normalize_target_value(value, *, is_url: bool = False) -> str:
+    if is_url:
+        normalized = normalize_source_url(extract_cell_url(value) or extract_cell_text(value))
+        return normalized or str(extract_cell_text(value) or "").strip()
+    return str(extract_cell_text(value) or value or "").strip()
 
 
 def _open_hidden_comment_entry_points(page: Page) -> list[str]:
@@ -691,12 +750,66 @@ def _try_reveal_comment_form(target) -> bool:
         try:
             locator = target.locator(selector).first
             if locator.count() > 0 and locator.is_visible():
+                href = ""
+                text = ""
+                tag_name = ""
+                try:
+                    href = str(locator.get_attribute("href") or "").strip()
+                except Exception:
+                    href = ""
+                try:
+                    text = str(locator.inner_text(timeout=300) or "").strip()
+                except Exception:
+                    text = ""
+                try:
+                    tag_name = str(locator.evaluate("(el) => el.tagName") or "").strip().lower()
+                except Exception:
+                    tag_name = ""
+
+                if not _should_click_reveal_candidate(
+                    current_url=getattr(target, "url", "") or "",
+                    tag_name=tag_name,
+                    href=href,
+                    text=text,
+                ):
+                    continue
                 locator.click(timeout=1500, force=True)
                 time.sleep(0.5)
                 return True
         except Exception:
             continue
     return False
+
+
+def _should_click_reveal_candidate(current_url: str, tag_name: str, href: str, text: str) -> bool:
+    lowered_text = (text or "").strip().lower()
+    lowered_href = (href or "").strip().lower()
+    tag = (tag_name or "").strip().lower()
+
+    if any(marker in lowered_text for marker in REVEAL_TEXT_BLOCK_MARKERS):
+        return False
+    if any(marker in lowered_href for marker in REVEAL_LINK_BLOCK_MARKERS):
+        return False
+
+    if tag != "a":
+        return True
+
+    if not lowered_href or lowered_href.startswith("#") or lowered_href.startswith("javascript:"):
+        return True
+
+    current = urlparse(current_url or "")
+    candidate = urlparse(urljoin(current_url or "", href or ""))
+
+    if candidate.scheme and candidate.scheme not in {"http", "https"}:
+        return False
+
+    if current.netloc and candidate.netloc and candidate.netloc != current.netloc:
+        return False
+
+    if current.path and candidate.path and candidate.path != current.path and not candidate.fragment:
+        return False
+
+    return True
 
 
 def _try_fill_comment_editor(target, comment_content: str) -> tuple[bool, str]:
@@ -1117,11 +1230,6 @@ def _is_submission_context_reset_error(error_msg: str) -> bool:
 
 
 def _detect_submission_side_effect(page: Page, frame=None) -> str:
-    current_url = str(page.url)
-    original_url = str(getattr(page, "_original_url", ""))
-    if current_url and original_url and current_url != original_url:
-        return f"URL 已从 {original_url} 跳转为 {current_url}"
-
     targets = []
     if frame:
         targets.append(frame)
@@ -1654,13 +1762,36 @@ def process_task(
     active_target = target
     
     if active_target:
-        target_name = active_target.get("anchor_text", "Anonymous").title()
-        target_email = str(active_target.get("email", "") or active_target.get("联系邮箱", "") or DEFAULT_CONTACT_EMAIL)
-        target_url = active_target["url"]
+        target_name = _normalize_target_value(
+            active_target.get("anchor_text", "") or active_target.get("默认锚文本", "") or "Anonymous"
+        ).title()
+        target_email = (
+            _normalize_target_value(active_target.get("email", "") or active_target.get("联系邮箱", ""))
+            or DEFAULT_CONTACT_EMAIL
+        )
+        target_url = _normalize_target_value(
+            active_target.get("url", "") or active_target.get("目标网站", ""),
+            is_url=True,
+        )
+        if not target_url:
+            target_url = MY_TARGET_WEBSITE
         
-        print(f"  📋 使用飞书目标站配置：锚文本='{active_target.get('anchor_text', '')}' -> {target_url}")
+        sanitized_target = {
+            **active_target,
+            "url": target_url,
+            "anchor_text": _normalize_target_value(
+                active_target.get("anchor_text", "") or active_target.get("默认锚文本", "") or "click here"
+            ),
+            "email": target_email,
+            "description": _normalize_target_value(
+                active_target.get("description", "") or active_target.get("网站说明", "")
+            ),
+        }
+        print(
+            f"  📋 使用飞书目标站配置：锚文本='{_normalize_target_value(active_target.get('anchor_text', '') or active_target.get('默认锚文本', ''))}' -> {target_url}"
+        )
         content_bundle = generate_localized_bundle_for_target(
-            active_target,
+            sanitized_target,
             generation_link_format,
             page_context,
             include_chinese_translation=bool(ai_cfg.get("generate_chinese_translation", False)),
@@ -1773,6 +1904,219 @@ def process_task(
     return result
 
 
+def _run_task_worker(task_payload: dict) -> dict:
+    runtime_cfg = load_runtime_config()
+    workbook = FeishuWorkbook.from_config()
+    if not workbook:
+        raise RuntimeError("飞书未正确配置，无法执行单条任务。")
+
+    source_format_lookup = build_source_format_lookup(workbook)
+    browser_cfg = merge_browser_config(runtime_cfg.get("browser", {}))
+    cdp_url = ensure_allowed_cdp_url(str(browser_cfg.get("connect_cdp_url", DEFAULT_CDP_URL)), browser_cfg)
+
+    with sync_playwright() as p:
+        ensure_cdp_blank_page(cdp_url)
+        browser_app = p.chromium.connect_over_cdp(cdp_url)
+        context, work_page = _acquire_cdp_work_page(browser_app, browser_cfg)
+        try:
+            _maybe_bring_to_front(work_page, browser_cfg)
+            with task_timeout_guard(runtime_cfg["execution"].get("single_task_timeout_seconds", 0)):
+                result = process_task(
+                    task_payload["status_row"],
+                    task_payload["target"],
+                    workbook,
+                    work_page,
+                    runtime_cfg,
+                    source_format_lookup=source_format_lookup,
+                )
+        except Exception as e:
+            last_updated_value = time.strftime('%Y-%m-%d %H:%M:%S')
+            reason = format_notes(
+                summarize_result_message(f"运行时异常: {translate_error(str(e))}"),
+                "任务执行中断，已自动回退为待重试。",
+            )
+            memory_meta = _apply_agent_memory_result(
+                url=normalize_source_url(
+                    extract_cell_url(task_payload["status_row"].get("来源链接", ""))
+                    or extract_cell_text(task_payload["status_row"].get("来源链接", ""))
+                ),
+                success=False,
+                execution_mode=str(task_payload["status_row"].get("执行模式", "") or EXECUTION_MODE_CLASSIC),
+                recommended_strategy=str(task_payload["status_row"].get("推荐策略", "") or "dom"),
+                diagnostic_category="task_exception",
+                reason=reason,
+                runtime_cfg=runtime_cfg,
+            )
+            failure_updates = _build_task_failure_updates(
+                task_payload["status_row"],
+                task_payload["target"],
+                reason,
+                last_updated_value,
+            )
+            failure_updates["域名冷却至"] = (
+                _format_memory_dt(memory_meta.get("cooldown_until", ""))
+                if memory_meta.get("cooldown_until")
+                else ""
+            )
+            workbook.upsert_sheet_dict(
+                "records",
+                STATUS_HEADERS,
+                ["来源链接", "目标站标识"],
+                failure_updates,
+            )
+            result = {
+                "success": False,
+                "url": normalize_source_url(
+                    extract_cell_url(task_payload["status_row"].get("来源链接", ""))
+                    or extract_cell_text(task_payload["status_row"].get("来源链接", ""))
+                ),
+                "format": str(task_payload["status_row"].get("链接格式", "") or ""),
+                "reason": reason,
+                "target_website": str(task_payload["target"].get("url", "") or ""),
+                "batch_token": str(task_payload["status_row"].get("目标站标识", "") or ""),
+                "site_key": str(task_payload["target"].get("site_key", "") or ""),
+                "used_vision": False,
+                "diagnostic_category": "task_exception",
+                "memory_recorded": True,
+            }
+        finally:
+            try:
+                if not work_page.is_closed():
+                    work_page.close()
+            except Exception:
+                pass
+            try:
+                browser_app.close()
+            except Exception:
+                pass
+
+    sync_reporting_workbook(workbook=workbook)
+    return result
+
+
+def _run_task_via_subprocess(task: dict, runtime_cfg: dict) -> dict:
+    timeout_seconds = int(runtime_cfg["execution"].get("single_task_timeout_seconds", 0) or 0)
+    poll_interval = max(2, int(runtime_cfg["execution"].get("worker_poll_interval_seconds", 10) or 10))
+    timeout_buffer = max(5, int(runtime_cfg["execution"].get("worker_timeout_buffer_seconds", 20) or 20))
+
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as task_fp:
+        json.dump(task, task_fp, ensure_ascii=False)
+        task_path = task_fp.name
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as result_fp:
+        result_path = result_fp.name
+
+    proc = None
+    task_url = normalize_source_url(
+        extract_cell_url(task["status_row"].get("来源链接", ""))
+        or extract_cell_text(task["status_row"].get("来源链接", ""))
+    )
+    try:
+        proc = subprocess.Popen(
+            [
+                _current_python_bin(),
+                str(Path(__file__).resolve()),
+                "--worker-task-file",
+                task_path,
+                "--worker-result-file",
+                result_path,
+            ],
+            cwd=str(Path(__file__).resolve().parent),
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        )
+        started_at = time.time()
+        next_heartbeat = poll_interval
+        hard_timeout = timeout_seconds + timeout_buffer if timeout_seconds > 0 else 0
+
+        while True:
+            rc = proc.poll()
+            elapsed = int(time.time() - started_at)
+            if rc is not None:
+                break
+            if elapsed >= next_heartbeat:
+                print(f"  ⏳ 单条任务子进程仍在执行（{elapsed}s）...")
+                next_heartbeat += poll_interval
+            if hard_timeout > 0 and elapsed >= hard_timeout:
+                print(f"  ⏱️ 单条任务子进程超时（>{hard_timeout}s），正在终止...")
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                break
+            time.sleep(1)
+
+        if Path(result_path).exists():
+            try:
+                payload = json.loads(Path(result_path).read_text(encoding="utf-8") or "{}")
+                if isinstance(payload, dict) and payload:
+                    return payload
+            except Exception:
+                pass
+
+        exit_code = proc.returncode if proc else -1
+        if hard_timeout > 0 and int(time.time() - started_at) >= hard_timeout:
+            reason = format_notes(
+                summarize_result_message(f"运行时异常: 单条任务子进程超时（>{hard_timeout}s）"),
+                "任务执行中断，已自动回退为待重试。",
+            )
+        else:
+            reason = format_notes(
+                summarize_result_message(f"运行时异常: 单条任务子进程异常退出（exit={exit_code}）"),
+                "任务执行中断，已自动回退为待重试。",
+            )
+        last_updated_value = time.strftime('%Y-%m-%d %H:%M:%S')
+        workbook = FeishuWorkbook.from_config()
+        if workbook:
+            memory_meta = _apply_agent_memory_result(
+                url=task_url,
+                success=False,
+                execution_mode=str(task["status_row"].get("执行模式", "") or EXECUTION_MODE_CLASSIC),
+                recommended_strategy=str(task["status_row"].get("推荐策略", "") or "dom"),
+                diagnostic_category="task_exception",
+                reason=reason,
+                runtime_cfg=runtime_cfg,
+            )
+            failure_updates = _build_task_failure_updates(task["status_row"], task["target"], reason, last_updated_value)
+            failure_updates["域名冷却至"] = (
+                _format_memory_dt(memory_meta.get("cooldown_until", ""))
+                if memory_meta.get("cooldown_until")
+                else ""
+            )
+            workbook.upsert_sheet_dict(
+                "records",
+                STATUS_HEADERS,
+                ["来源链接", "目标站标识"],
+                failure_updates,
+            )
+            sync_reporting_workbook(workbook=workbook)
+        return {
+            "success": False,
+            "url": task_url,
+            "format": str(task["status_row"].get("链接格式", "") or ""),
+            "reason": reason,
+            "target_website": str(task["target"].get("url", "") or ""),
+            "batch_token": str(task["status_row"].get("目标站标识", "") or ""),
+            "site_key": str(task["target"].get("site_key", "") or ""),
+            "used_vision": False,
+            "diagnostic_category": "task_exception",
+            "memory_recorded": True,
+        }
+    finally:
+        for path in (task_path, result_path):
+            try:
+                Path(path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def _worker_main(task_file: str, result_file: str) -> int:
+    task_payload = json.loads(Path(task_file).read_text(encoding="utf-8"))
+    result = _run_task_worker(task_payload)
+    Path(result_file).write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    return 0
+
+
 
 # =====================================================================
 # 主程序入口
@@ -1801,97 +2145,108 @@ def run_once(selected_tasks: Optional[list[dict]] = None, send_report: bool = Tr
     browser_cfg = merge_browser_config(runtime_cfg.get("browser", {}))
     cdp_url = ensure_allowed_cdp_url(str(browser_cfg.get("connect_cdp_url", DEFAULT_CDP_URL)), browser_cfg)
 
-    print(f"🕸️ 正在连接你的本地 Chrome 浏览器（{cdp_url}）...")
-    with sync_playwright() as p:
-        try:
-            ensure_cdp_blank_page(cdp_url)
+    print(f"🕸️ 正在检查你的本地 Chrome 浏览器（{cdp_url}）...")
+    try:
+        ensure_cdp_blank_page(cdp_url)
+        with sync_playwright() as p:
             browser_app = p.chromium.connect_over_cdp(cdp_url)
-            print("🤩 成功接管本地真实 Chrome！指纹认证已生效。\n")
-            context, work_page = _acquire_cdp_work_page(browser_app, browser_cfg)
-
-            for idx, task in enumerate(tasks, start=1):
-                if work_page.is_closed():
-                    context, work_page = _acquire_cdp_work_page(browser_app, browser_cfg)
-                else:
-                    _maybe_bring_to_front(work_page, browser_cfg)
-                print(f"\n>>> 进度: {idx}/{len(tasks)}")
-                try:
-                    res = process_task(
-                        task["status_row"],
-                        task["target"],
-                        workbook,
-                        work_page,
-                        runtime_cfg,
-                        source_format_lookup=source_format_lookup,
-                    )
-                except Exception as e:
-                    last_updated_value = time.strftime('%Y-%m-%d %H:%M:%S')
-                    reason = format_notes(
-                        summarize_result_message(f"运行时异常: {translate_error(str(e))}"),
-                        "任务执行中断，已自动回退为待重试。",
-                    )
-                    memory_meta = _apply_agent_memory_result(
-                        url=normalize_source_url(
-                            extract_cell_url(task["status_row"].get("来源链接", ""))
-                            or extract_cell_text(task["status_row"].get("来源链接", ""))
-                        ),
-                        success=False,
-                        execution_mode=str(task["status_row"].get("执行模式", "") or EXECUTION_MODE_CLASSIC),
-                        recommended_strategy=str(task["status_row"].get("推荐策略", "") or "dom"),
-                        diagnostic_category="task_exception",
-                        reason=reason,
-                        runtime_cfg=runtime_cfg,
-                    )
-                    print(f"  ❌ 单条任务异常，已回退为待重试: {reason}")
-                    failure_updates = _build_task_failure_updates(task["status_row"], task["target"], reason, last_updated_value)
-                    failure_updates["域名冷却至"] = _format_memory_dt(memory_meta.get("cooldown_until", "")) if memory_meta.get("cooldown_until") else ""
-                    workbook.upsert_sheet_dict(
-                        "records",
-                        STATUS_HEADERS,
-                        ["来源链接", "目标站标识"],
-                        failure_updates,
-                    )
-                    res = {
-                        "success": False,
-                        "url": normalize_source_url(
-                            extract_cell_url(task["status_row"].get("来源链接", ""))
-                            or extract_cell_text(task["status_row"].get("来源链接", ""))
-                        ),
-                        "format": str(task["status_row"].get("链接格式", "") or ""),
-                        "reason": reason,
-                        "target_website": str(task["target"].get("url", "") or ""),
-                        "batch_token": str(task["status_row"].get("目标站标识", "") or ""),
-                        "site_key": str(task["target"].get("site_key", "") or ""),
-                        "used_vision": False,
-                        "diagnostic_category": "task_exception",
-                        "memory_recorded": True,
-                    }
-                    if not work_page.is_closed():
-                        work_page.close()
-                    work_page = context.new_page()
-                    _maybe_bring_to_front(work_page, browser_cfg)
-                if res["success"]:
-                    success_list.append(res)
-                else:
-                    failed_list.append(res)
-
-            if not work_page.is_closed():
-                work_page.close()
+            print("🤩 成功接管本地真实 Chrome！将以单条任务隔离模式执行。\n")
             browser_app.close()
+    except Exception as e:
+        print(f"❌ 接管本地浏览器失败（请确认是通过 Start_Robot.command 启动的）: {e}")
+        failed_list.append({"url": "", "reason": str(e), "success": False})
+        sync_reporting_workbook(workbook=workbook)
+        return {
+            "success": success_list,
+            "failed": failed_list,
+            "today_tasks": len(tasks),
+        }
 
-            if send_report:
-                from webhook_sender import create_webhook_sender
-                sender = create_webhook_sender()
-                if sender:
-                    summary = {"success": success_list, "failed": failed_list}
-                    title = f"🌍 外链自动化执行报告 | 成功 {len(success_list)} | 失败 {len(failed_list)}"
-                    sender.send_detailed_report(title, summary)
-                else:
-                    print("\nℹ️ 未配置飞书 Webhook，跳过通知。")
+    use_isolated_worker = bool(runtime_cfg["execution"].get("isolated_task_worker", True))
 
+    for idx, task in enumerate(tasks, start=1):
+        print(f"\n>>> 进度: {idx}/{len(tasks)}")
+        try:
+            if use_isolated_worker:
+                res = _run_task_via_subprocess(task, runtime_cfg)
+            else:
+                with sync_playwright() as p:
+                    browser_app = p.chromium.connect_over_cdp(cdp_url)
+                    context, work_page = _acquire_cdp_work_page(browser_app, browser_cfg)
+                    try:
+                        _maybe_bring_to_front(work_page, browser_cfg)
+                        with task_timeout_guard(runtime_cfg["execution"].get("single_task_timeout_seconds", 0)):
+                            res = process_task(
+                                task["status_row"],
+                                task["target"],
+                                workbook,
+                                work_page,
+                                runtime_cfg,
+                                source_format_lookup=source_format_lookup,
+                            )
+                    finally:
+                        try:
+                            if not work_page.is_closed():
+                                work_page.close()
+                        except Exception:
+                            pass
+                        browser_app.close()
         except Exception as e:
-            print(f"❌ 接管本地浏览器失败（请确认是通过 Start_Robot.command 启动的）: {e}")
-            failed_list.append({"url": "", "reason": str(e), "success": False})
+            last_updated_value = time.strftime('%Y-%m-%d %H:%M:%S')
+            reason = format_notes(
+                summarize_result_message(f"运行时异常: {translate_error(str(e))}"),
+                "任务执行中断，已自动回退为待重试。",
+            )
+            memory_meta = _apply_agent_memory_result(
+                url=normalize_source_url(
+                    extract_cell_url(task["status_row"].get("来源链接", ""))
+                    or extract_cell_text(task["status_row"].get("来源链接", ""))
+                ),
+                success=False,
+                execution_mode=str(task["status_row"].get("执行模式", "") or EXECUTION_MODE_CLASSIC),
+                recommended_strategy=str(task["status_row"].get("推荐策略", "") or "dom"),
+                diagnostic_category="task_exception",
+                reason=reason,
+                runtime_cfg=runtime_cfg,
+            )
+            print(f"  ❌ 单条任务异常，已回退为待重试: {reason}")
+            failure_updates = _build_task_failure_updates(task["status_row"], task["target"], reason, last_updated_value)
+            failure_updates["域名冷却至"] = _format_memory_dt(memory_meta.get("cooldown_until", "")) if memory_meta.get("cooldown_until") else ""
+            workbook.upsert_sheet_dict(
+                "records",
+                STATUS_HEADERS,
+                ["来源链接", "目标站标识"],
+                failure_updates,
+            )
+            res = {
+                "success": False,
+                "url": normalize_source_url(
+                    extract_cell_url(task["status_row"].get("来源链接", ""))
+                    or extract_cell_text(task["status_row"].get("来源链接", ""))
+                ),
+                "format": str(task["status_row"].get("链接格式", "") or ""),
+                "reason": reason,
+                "target_website": str(task["target"].get("url", "") or ""),
+                "batch_token": str(task["status_row"].get("目标站标识", "") or ""),
+                "site_key": str(task["target"].get("site_key", "") or ""),
+                "used_vision": False,
+                "diagnostic_category": "task_exception",
+                "memory_recorded": True,
+            }
+        if res["success"]:
+            success_list.append(res)
+        else:
+            failed_list.append(res)
+
+    if send_report:
+        from webhook_sender import create_webhook_sender
+        sender = create_webhook_sender()
+        if sender:
+            summary = {"success": success_list, "failed": failed_list}
+            title = f"🌍 外链自动化执行报告 | 成功 {len(success_list)} | 失败 {len(failed_list)}"
+            sender.send_detailed_report(title, summary)
+        else:
+            print("\nℹ️ 未配置飞书 Webhook，跳过通知。")
 
     sync_reporting_workbook(workbook=workbook)
 
@@ -1902,8 +2257,22 @@ def run_once(selected_tasks: Optional[list[dict]] = None, send_report: bool = Tr
     }
 
 
+def _parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--worker-task-file")
+    parser.add_argument("--worker-result-file")
+    return parser.parse_args()
+
+
 def main():
+    args = _parse_args()
+    if args.worker_task_file:
+        if not args.worker_result_file:
+            raise SystemExit("--worker-result-file is required with --worker-task-file")
+        return _worker_main(args.worker_task_file, args.worker_result_file)
     run_once(send_report=True)
+    return 0
+
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

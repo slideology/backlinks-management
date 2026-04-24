@@ -28,12 +28,20 @@ cat > "$PLIST_PATH" <<PLIST
     <string>$PROJECT_DIR</string>
 
     <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>10</integer>
-        <key>Minute</key>
-        <integer>15</integer>
-    </dict>
+    <array>
+        <dict>
+            <key>Hour</key>
+            <integer>8</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+        <dict>
+            <key>Hour</key>
+            <integer>12</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+    </array>
 
     <key>RunAtLoad</key>
     <false/>
@@ -49,6 +57,6 @@ PLIST
 launchctl unload "$PLIST_PATH" >/dev/null 2>&1 || true
 launchctl load "$PLIST_PATH"
 
-echo "✅ 已安装 launchd 定时任务：每天 10:00 自动运行"
+echo "✅ 已安装 launchd 定时任务：每天 08:00 和 12:00 自动运行"
 echo "📄 plist: $PLIST_PATH"
 echo "📝 日志目录: $LOG_DIR"
