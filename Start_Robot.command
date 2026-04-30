@@ -182,6 +182,12 @@ fi
 mkdir -p "$PROJECT_DIR/logs" "$(dirname "$RUN_LOG_FILE")"
 touch "$RUN_LOG_FILE"
 
+# 手动前台运行时，把当前 shell 输出同步写入 RUN_LOG_FILE，
+# 这样 watchdog 观察到的日志文件会持续更新，不会把真实在跑的任务误判成无进展。
+if [[ -t 1 ]]; then
+    exec > >(/usr/bin/tee -a "$RUN_LOG_FILE") 2>&1
+fi
+
 WATCHDOG_TIMEOUT_SECONDS="$("$PYTHON_BIN" - <<'PY'
 import json
 from pathlib import Path

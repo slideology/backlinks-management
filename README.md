@@ -51,13 +51,95 @@
 - 调度器会按“**今天还差多少成功数**”动态补任务池，而不是只拿固定 1 条
 - 每日总控结束后会自动刷新飞书中文运营总表，供人工查看来源、评论、目标站和历史去重信息
 
-如果你想立刻手动触发一次，不等到第二天 10 点，可以执行：
+如果你想立刻手动触发一次，不等到下一个自动窗口，可以执行：
 
 ```bash
 launchctl kickstart -k gui/$(id -u)/com.backlink.robot.daily
 ```
 
 首次正式自动运行前，建议先手动启动一次机器人 Chrome，确认专用发帖账号已经登录。
+
+---
+
+## 🔎 批量页面探测
+
+批量探测已经和正式发帖拆成两条独立链路，避免探测任务和发帖任务抢同一个浏览器。
+
+- 定时任务入口：[/Users/dahuang/Library/LaunchAgents/com.backlink.source-probe.daily.plist](/Users/dahuang/Library/LaunchAgents/com.backlink.source-probe.daily.plist)
+- 安装脚本：[/Users/dahuang/CascadeProjects/test/backlink-management/scripts/install_probe_launch_agent.sh](/Users/dahuang/CascadeProjects/test/backlink-management/scripts/install_probe_launch_agent.sh)
+- 探测脚本：[/Users/dahuang/CascadeProjects/test/backlink-management/source_probe_audit.py](/Users/dahuang/CascadeProjects/test/backlink-management/source_probe_audit.py)
+- 探测浏览器：`Chrome Canary + 9667`
+- 探测 profile：`/Users/dahuang/ChromeCanaryProbe9667`
+
+当前自动运行策略是：
+- 北京时间 **19:00** 自动启动
+- 默认执行：`source_probe_audit.py --force --worth-filter 待确认`
+- 也就是每天优先用新探测策略重跑 `是否值得发帖 = 待确认` 的来源
+- 正式发帖仍使用 `9666`，批量探测使用 `9667`
+
+---
+
+## 📅 2026-04-30 最近工作摘要
+
+### ✅ 最近完成的关键改动
+
+#### 1. 正式发帖和批量探测彻底分离
+- 正式发帖继续使用：
+  - `Chrome Canary + 9666`
+  - `/Users/dahuang/ChromeCanaryAutoBot9666`
+- 批量探测改成独立资源：
+  - `Chrome Canary + 9667`
+  - `/Users/dahuang/ChromeCanaryProbe9667`
+- 已清掉误提交到 `launchd` 的临时 keepalive 服务 `codex.source_probe_audit`，避免它反复拉起探测浏览器。
+
+#### 2. 批量探测改成每天 19:00 重跑“待确认”
+- `com.backlink.source-probe.daily` 已改成北京时间 `19:00` 触发。
+- 运行命令已经从普通增量扫描改成：
+  - `source_probe_audit.py --force --worth-filter 待确认`
+- 这样旧的 `completed/failed` 不会直接把新策略跳过，晚上会优先校正最有价值的 `待确认` 池。
+
+#### 3. 页面探测策略升级
+- `source_probe_audit.py` 已改成“轻探测优先 + 条件性重探测”。
+- 轻探测会先判断：
+  - 折叠评论入口
+  - 登录墙
+  - challenge/captcha
+  - 评论关闭
+  - 明确无评论区
+- 强阳性页面会更积极地从 `待确认` 升为 `是`。
+- 探测失败或超时时，会优先继承旧的强信号，避免把已有好结论打回笼统的 `待确认`。
+
+#### 4. 批量探测重跑结果
+- `2026-04-28/2026-04-29` 手动补跑了一轮 `待确认` 重校正。
+- 本轮重跑：`590` 条
+- 从 `待确认` 升为 `是`：`202` 条
+- 仍为 `待确认`：`275` 条
+- 当前总盘子：
+  - `total_scanned = 1522`
+  - `completed = 1247`
+  - `failed = 275`
+  - `是否值得发帖=是 = 436`
+  - `是否值得发帖=待确认 = 275`
+  - `是否值得发帖=否 = 811`
+
+#### 5. 最近两天正式发帖结果
+- `2026-04-29`
+  - `bearclicker.net = 7/10`
+  - `nanobananaimage.org = 10/10`
+  - 到 `14:00` 窗口结束后正常收尾
+- `2026-04-30`
+  - `bearclicker.net = 5/10`
+  - `nanobananaimage.org = 8/10`
+  - 到 `14:00` 窗口结束后正常收尾
+
+### 📌 当前待办
+
+- [ ] **修掉登录页 `#comment` 误判成功**：例如 `ride.guru/content/accounts/login?next=/content/comment/#comment` 这类 URL 不应仅因带评论锚点就判成功。
+- [ ] **继续压 Gemini 文案超时**：正式链路仍大量出现 `Gemini 生成多语言上下文评论失败: timed out` 和 `Gemini 生成评论失败: timed out`，下一步应优先改成“最小英文评论优先”。
+- [ ] **降低 Vision 兜底依赖**：Vision 熔断和超时仍是正式发帖失败的大头之一，应该继续把更多页面在 DOM/iframe 层收口。
+- [ ] **探测完成后自动关闭 `9667` 浏览器壳**：当前探测脚本结束后偶尔会留下 `ChromeCanaryProbe9667` 浏览器壳，虽然不再执行任务，但容易造成误判。
+- [ ] **让 `source_history_audit.py` 复用轻探测页面上下文**：当前 `audit_single_page()` 仍可能二次 `goto()`，对慢站和动态站不够稳。
+- [ ] **飞书写回限频治理**：继续降低 `90217 too many request` 对状态回写和统计口径的影响。
 
 ---
 

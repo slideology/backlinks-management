@@ -56,7 +56,8 @@ class FormAutomationLocalTests(unittest.TestCase):
         )
 
         self.assertFalse(meta["ok"])
-        self.assertEqual(meta["diagnostic_category"], "hard_blocker")
+        self.assertEqual(meta["diagnostic_category"], "challenge")
+        self.assertTrue(meta["challenge_after_expand"])
 
     @patch("form_automation_local._deep_scroll_to_bottom")
     @patch("form_automation_local.try_dismiss_overlays")
@@ -95,6 +96,45 @@ class FormAutomationLocalTests(unittest.TestCase):
 
         self.assertFalse(meta["ok"])
         self.assertEqual(meta["diagnostic_category"], "comment_signal_missing")
+
+    @patch("form_automation_local._deep_scroll_to_bottom")
+    @patch("form_automation_local.try_dismiss_overlays")
+    @patch("form_automation_local._fast_navigate_for_commenting", return_value={"partial_navigation": False, "navigation_warning": ""})
+    def test_preprobe_page_for_generation_marks_login_wall_after_expand(
+        self,
+        _mock_nav,
+        _mock_dismiss,
+        _mock_scroll,
+    ):
+        class FakeLocator:
+            def __init__(self, texts=None):
+                self._texts = texts or [""]
+
+            def count(self):
+                return 0
+
+            def all_inner_texts(self):
+                return self._texts
+
+        class FakePage:
+            frames = []
+
+            def locator(self, selector):
+                if selector == "body":
+                    return FakeLocator(["Please log in to comment"])
+                return FakeLocator()
+
+        meta = _preprobe_page_for_generation(
+            FakePage(),
+            "https://example.com/post",
+            15000,
+            "classic_dom",
+            "dom",
+        )
+
+        self.assertFalse(meta["ok"])
+        self.assertEqual(meta["diagnostic_category"], "login_required")
+        self.assertTrue(meta["login_wall_after_expand"])
 
     def test_should_use_vision_when_dom_never_found_comment_box(self):
         self.assertTrue(_should_use_vision_fallback("Layer 1: 主页面及所有嵌套 iframe 中均未找到任何评论输入框"))

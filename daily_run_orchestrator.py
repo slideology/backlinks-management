@@ -1,4 +1,5 @@
 import json
+import os
 from collections import Counter
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
@@ -93,11 +94,21 @@ def main():
     timezone_name = str(scheduler_cfg.get("timezone", "Asia/Shanghai") or "Asia/Shanghai")
     now_local = datetime.now(ZoneInfo(timezone_name))
     active_window = _resolve_run_window(now_local, scheduler_cfg.get("run_windows", []))
-    if not active_window:
+    force_run_window = str(os.environ.get("FORCE_RUN_WINDOW", "") or "").strip().lower() in {"1", "true", "yes", "on"}
+    if not active_window and not force_run_window:
         print("=" * 60)
         print(f"🕒 当前时间 {now_local.strftime('%Y-%m-%d %H:%M:%S')} 不在允许运行窗口内，跳过本轮。")
         print("=" * 60)
         return
+    if not active_window and force_run_window:
+        active_window = {
+            "start": now_local.time(),
+            "end": time(23, 59, 59),
+            "label": "manual-override",
+        }
+        print("=" * 60)
+        print(f"⚠️ 当前时间 {now_local.strftime('%Y-%m-%d %H:%M:%S')} 不在配置窗口内，但已启用手动临时运行覆盖。")
+        print("=" * 60)
 
     configured_max_rounds = int(scheduler_cfg.get("max_rounds_per_day", 20) or 0)
     max_rounds = configured_max_rounds if configured_max_rounds > 0 else 1000000

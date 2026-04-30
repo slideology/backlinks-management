@@ -300,6 +300,28 @@ def _open_hidden_comment_entry_points(page: Page) -> list[str]:
         try:
             locator = page.locator(selector)
             if locator.count() > 0 and locator.first.is_visible():
+                href = ""
+                text = ""
+                tag_name = ""
+                try:
+                    href = str(locator.first.get_attribute("href") or "").strip()
+                except Exception:
+                    href = ""
+                try:
+                    text = str(locator.first.inner_text(timeout=300) or "").strip()
+                except Exception:
+                    text = ""
+                try:
+                    tag_name = str(locator.first.evaluate("(el) => el.tagName") or "").strip().lower()
+                except Exception:
+                    tag_name = ""
+                if not _should_click_reveal_candidate(
+                    current_url=getattr(page, "url", "") or "",
+                    tag_name=tag_name,
+                    href=href,
+                    text=text,
+                ):
+                    continue
                 locator.first.scroll_into_view_if_needed()
                 locator.first.click(timeout=1000)
                 clicked.append(selector)
@@ -326,6 +348,17 @@ def _detect_complex_editor_signal(page: Page) -> str:
         try:
             locator = page.locator(selector)
             if locator.count() > 0:
+                return selector
+        except Exception:
+            continue
+    return ""
+
+
+def _detect_visible_comment_editor(page: Page) -> str:
+    for selector in COMMENT_EDITOR_SELECTORS:
+        try:
+            locator = page.locator(selector).first
+            if locator.count() > 0 and locator.is_visible():
                 return selector
         except Exception:
             continue
@@ -460,6 +493,19 @@ def _detect_hard_blocker(page: Page) -> tuple[bool, str]:
     return False, ""
 
 
+def _categorize_hard_blocker_reason(reason: str) -> str:
+    text = str(reason or "").strip().lower()
+    if not text:
+        return "hard_blocker"
+    if any(marker in text for marker in ("comments are closed", "评论已关闭", "closed for comments", "不允许评论")):
+        return "comments_closed"
+    if any(marker in text for marker in ("log in to comment", "you must be logged in", "sign in to comment", "login to post a comment", "登录后评论", "必须登录后才能评论", "登录墙", "账号")):
+        return "login_required"
+    if any(marker in text for marker in ("cloudflare", "captcha", "challenge", "turnstile", "人机验证", "安全检查")):
+        return "challenge"
+    return "hard_blocker"
+
+
 def _page_has_comment_signals(page: Page) -> tuple[bool, str]:
     for selector in COMMENT_SIGNAL_SELECTORS:
         try:
@@ -504,6 +550,14 @@ def _preprobe_page_for_generation(
         "navigation_warning": "",
         "recommended_strategy": recommended_strategy,
         "action_trace": [],
+        "comment_signal_found": False,
+        "comment_signal_reason": "",
+        "comment_entry_found": False,
+        "comment_entry_expanded": False,
+        "comment_form_visible": False,
+        "login_wall_after_expand": False,
+        "challenge_after_expand": False,
+        "comment_closed_after_expand": False,
     }
     nav_meta = _fast_navigate_for_commenting(page, url, page_load_timeout_ms)
     meta["navigation_warning"] = nav_meta.get("navigation_warning", "")
@@ -515,11 +569,13 @@ def _preprobe_page_for_generation(
     _deep_scroll_to_bottom(page)
     _append_agent_trace(meta, "deep_scroll")
 
-    if execution_mode == EXECUTION_MODE_AGENT:
-        clicked_selectors = _open_hidden_comment_entry_points(page)
-        if clicked_selectors:
-            _append_agent_trace(meta, f"reveal_comment_entry:{len(clicked_selectors)}")
+    clicked_selectors = _open_hidden_comment_entry_points(page)
+    if clicked_selectors:
+        meta["comment_entry_found"] = True
+        meta["comment_entry_expanded"] = True
+        _append_agent_trace(meta, f"reveal_comment_entry:{len(clicked_selectors)}")
 
+    if execution_mode == EXECUTION_MODE_AGENT:
         complex_editor_selector = _detect_complex_editor_signal(page)
         if complex_editor_selector:
             meta["recommended_strategy"] = "iframe"
@@ -527,18 +583,35 @@ def _preprobe_page_for_generation(
 
     blocker_detected, blocker_reason = _detect_hard_blocker(page)
     if blocker_detected:
+        blocker_category = _categorize_hard_blocker_reason(blocker_reason)
+        meta["login_wall_after_expand"] = blocker_category == "login_required"
+        meta["challenge_after_expand"] = blocker_category == "challenge"
+        meta["comment_closed_after_expand"] = blocker_category == "comments_closed"
         meta.update(
             {
                 "ok": False,
                 "message": "页面预探测判定当前页面不值得继续尝试。",
                 "diagnosis": blocker_reason,
-                "diagnostic_category": "hard_blocker",
+                "diagnostic_category": blocker_category,
             }
         )
         _append_agent_trace(meta, "preprobe_stop")
         return meta
 
     has_comment_signal, comment_reason = _page_has_comment_signals(page)
+    meta["comment_signal_found"] = bool(has_comment_signal)
+    meta["comment_signal_reason"] = comment_reason
+    visible_editor_selector = _detect_visible_comment_editor(page)
+    if visible_editor_selector:
+        meta["comment_form_visible"] = True
+        _append_agent_trace(meta, f"comment_editor:{visible_editor_selector}")
+    elif has_comment_signal and (
+        comment_reason.startswith("命中选择器")
+        or "iframe" in comment_reason
+        or "评论区提示词" in comment_reason
+    ):
+        meta["comment_entry_found"] = True
+
     if not has_comment_signal:
         meta.update(
             {

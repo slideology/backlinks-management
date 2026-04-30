@@ -510,13 +510,24 @@ class WebsiteFormatDetector:
         }
 
     def _prepare_probe_page(self, page: Page, url: str) -> None:
-        page.goto(url, timeout=20000)
+        last_error = None
+        for wait_until, timeout_ms in (("domcontentloaded", 12000), ("commit", 8000)):
+            try:
+                page.goto(url, timeout=timeout_ms, wait_until=wait_until)
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
         try:
-            page.wait_for_load_state("domcontentloaded", timeout=5000)
+            page.wait_for_load_state("domcontentloaded", timeout=2500)
         except Exception:
             pass
         try:
-            page.wait_for_load_state("networkidle", timeout=8000)
+            # Slow ad-heavy blog pages often never reach a calm network state; keep
+            # this best-effort and short so probe time is spent on actual capability checks.
+            page.wait_for_load_state("networkidle", timeout=1500)
         except Exception:
             pass
 
